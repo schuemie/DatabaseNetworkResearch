@@ -1,3 +1,11 @@
+# Compute similarity between databases based on aggregate statistcs (already collected for database
+# diagnostics).
+# Currently restricting to drugs (ingredients) and conditions, because
+# 1. Other characteristics like demographics will likely get swamped by these anyway.
+# 2. Drugs and ingredients will be correlated with everything else, and are therefore good proxies.
+# 3. We can make drugs and conditions very similar in terms of standard concepts, so focusing on the
+#    content differences, not the coding differences.
+
 library(DatabaseConnector)
 library(dplyr)
 library(Matrix)

@@ -1,3 +1,7 @@
+# Simulation studies to assess the impact of database differences (population and capture process)
+# on the accuracy of database network estimates. We assume there is a target population to which we
+# wish to generalize.
+
 library(dplyr)
 
 # Simulation settings ------------------------------------------------------------------------------
@@ -52,9 +56,9 @@ simulateOne <- function(seed, settings) {
   databaseMixtures <- databaseMixtures / rowSums(databaseMixtures) # Subgroup mixture per database
   trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
 
-  databaseCpChars = matrix(rbinom(settings$nDatabases * settings$nSubgroups, 1, 0.5),
+  databaseCpChars = matrix(rbinom(settings$nDatabases * settings$nCaptureProcessChars, 1, 0.5),
                            nrow = settings$nDatabases,
-                           ncol = settings$nSubgroups) # Data capture process characteristics per DB (binary)
+                           ncol = settings$nCaptureProcessChars) # Data capture process characteristics per DB (binary)
   biasCpc <- rnorm(settings$nCaptureProcessChars, 0, settings$biasCpcSd) # Bias associated with each data capture process characteristic.
   databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
 
@@ -169,3 +173,74 @@ computePerformance(results)
 
 
 ParallelLogger::stopCluster(cluster)
+
+
+# Some specific examples ---------------------------------------------------------------------------
+library(dplyr)
+source("ForestPlot.R")
+
+data <- tibble(
+  logRr = c(0.9, 1.1),
+  seLogRr = c(0.09, 0.11)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example1.svg", plot, width = 8, height = 3)
+
+
+data <- tibble(
+  logRr = c(0.9, 1.1, 1, 1.05),
+  seLogRr = c(0.09, 0.11, 0.3, 0.5)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example1b.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(0.9),
+  seLogRr = c(0.09)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example1c.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(.1, 1.5),
+  seLogRr = c(0.75, 0.08)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example2.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(0.4, 2),
+  seLogRr = c(0.03, 0.08)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example3.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(1, 1, 1, 1),
+  seLogRr = c(0.08, 0.6, 0.61, 0.62)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example4.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(2, 1, 0.15, -0.15),
+  seLogRr = c(0.04, 0.06, 0.81, 0.8)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example5.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(2, 2.1, 0.15, -0.15),
+  seLogRr = c(0.04, 0.06, 0.08, 0.06)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example6.svg", plot, width = 8, height = 3)
+

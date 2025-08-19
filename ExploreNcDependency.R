@@ -1,3 +1,6 @@
+# Fetch data from LEGEND T2DM negative controls (NCs) to see how consistent systematic error is
+# across databases is, both at an aggregate level (across all NCs), and per NC.
+
 library(DatabaseConnector)
 library(dplyr)
 library(ggplot2)

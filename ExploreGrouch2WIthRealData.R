@@ -1,3 +1,8 @@
+# Explore the idea of detecting outliers in marginal statistics derived from databases. The
+# challenge is that we also only have marginal statistics for demographics, while we would like
+# to adjust for those.
+# This script includes analyses of real-world data.
+
 library(DatabaseConnector)
 library(dplyr)
 

@@ -1,3 +1,8 @@
+# Explore the idea of detecting outliers in marginal statistics derived from databases. The
+# challenge is that we also only have marginal statistics for demographics, while we would like
+# to adjust for those.
+# This script includes simulation studies.
+
 library(dplyr)
 library(Cyclops)
 
