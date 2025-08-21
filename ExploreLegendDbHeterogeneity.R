@@ -49,9 +49,9 @@ WHERE se_log_rr IS NOT NULL
     AND database_id NOT LIKE 'Meta-analysis%';
 "
 estimates <- renderTranslateQuerySql(connection = connection,
-                                       sql = sql,
-                                       schema = schema,
-                                       snakeCaseToCamelCase = TRUE)
+                                     sql = sql,
+                                     schema = schema,
+                                     snakeCaseToCamelCase = TRUE)
 estimates <- estimates |>
   mutate(databaseId = as.factor(databaseId),
          analysisName = as.factor(analysisName),
@@ -59,6 +59,60 @@ estimates <- estimates |>
          comparatorName = as.factor(gsub(" main ot2", "", comparatorName)),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
+
+
+# Fetch negative control estimates from LEGEND Hypertension ----------------------------------------
+connectionDetails <- createConnectionDetails(
+  dbms = "postgresql",
+  server = paste(keyring::key_get("ohdsiPostgresServer"),
+                 keyring::key_get("ohdsiPostgresShinyDatabase"), sep = "/"),
+  user = keyring::key_get("ohdsiPostgresUser"),
+  password = keyring::key_get("ohdsiPostgresPassword")
+)
+
+schema <- "legend"
+
+# executeSql(connection, "COMMIT;")
+connection <- connect(connectionDetails)
+negativeControlIds <- renderTranslateQuerySql(
+  connection = connection,
+  sql = "SELECT outcome_id FROM @schema.negative_control_outcome;",
+  schema = schema,
+  snakeCaseToCamelCase = TRUE
+)[, 1]
+sql <- "
+SELECT database_id,
+    target_id,
+    target.exposure_name AS target_name,
+    comparator_id,
+    comparator.exposure_name AS comparator_name,
+    outcome_id,
+    analysis_id,
+    CASE WHEN analysis_id = 1 THEN 'PS stratification' ELSE 'PS matching' END AS analysis_name,
+    log_rr,
+    se_log_rr
+FROM @schema.cohort_method_result
+INNER JOIN @schema.single_exposure_of_interest target
+  ON target_id = target.exposure_id
+INNER JOIN @schema.single_exposure_of_interest comparator
+  ON comparator_id = comparator.exposure_id
+WHERE se_log_rr IS NOT NULL
+    AND analysis_id IN (1, 3)
+    AND database_id 1= 'Meta-analysis';
+"
+estimates <- renderTranslateQuerySql(connection = connection,
+                                     sql = sql,
+                                     schema = schema,
+                                     snakeCaseToCamelCase = TRUE)
+# estimates <- estimates |> filter(databaseId != "Meta-analysis")
+estimates <- estimates |>
+  mutate(databaseId = as.factor(databaseId),
+         analysisName = as.factor(analysisName),
+         targetName = as.factor(targetName),
+         comparatorName = as.factor(comparatorName),
+         negativeControl = outcomeId %in% negativeControlIds)
+disconnect(connection)
+
 
 # Compute tau -----------------------------------------------------------------------
 groups <- estimates |>
@@ -85,7 +139,8 @@ taus <- ParallelLogger::clusterApply(cluster, groups, computeTau)
 ParallelLogger::stopCluster(cluster)
 
 taus <- bind_rows(taus)
-saveRDS(taus, "taus.rds")
+# saveRDS(taus, "taus.rds")
+saveRDS(taus, "tausHtn.rds")
 
 # Plot tau distributions ---------------------------------------------------------------------------
 taus <- readRDS("taus.rds")
@@ -119,3 +174,144 @@ ggplot(vizData, aes(y = tau)) +
     axis.text.x = element_blank()
   )
 ggsave("TauDistributions.png", width = 6, height = 5)
+
+# Compute correlations between databases based on their estimates ----------------------------------
+# Bayesian Hierarchical Model to Estimate Correlation Between Database Estimates
+# This code uses the 'brms' package in R.
+
+# --- 1. SETUP: Install and load necessary packages ---
+# If you don't have these packages, uncomment the lines below to install them.
+# install.packages("brms")
+# install.packages("tidyverse")
+
+library(brms)
+library(dplyr)
+library(tidyr)
+
+# SImulation
+set.seed(42)
+nOutcomes <- 50
+trueMu1 <- 0.1  # True average log(RR) for Db1
+trueMu2 <- 0.15 # True average log(RR) for Db2
+trueSigma1 <- 0.3 # True standard deviation of log(RR) for Db1
+trueSigma2 <- 0.4 # True standard deviation of log(RR) for Db2
+trueRho <- 0.2   # This is the true correlation we want to recover
+covMatrix <- matrix(c(trueSigma1^2, trueRho * trueSigma1 * trueSigma2,
+                      trueRho * trueSigma1 * trueSigma2, trueSigma2^2),
+                    nrow = 2)
+trueLogRrs <- MASS::mvrnorm(nOutcomes, mu = c(trueMu1, trueMu2), Sigma = covMatrix)
+simulatedDataWide <- tibble(
+  outcomeId = 1:nOutcomes,
+  trueLogRrDb1 = trueLogRrs[, 1],
+  trueLogRrDb2 = trueLogRrs[, 2],
+  seLogRrDb1 = rlnorm(nOutcomes, meanlog = -2, sdlog = 0.5),
+  seLogRrDb2 = rlnorm(nOutcomes, meanlog = -1.8, sdlog = 0.6)
+) %>%
+  mutate(
+    logRrDb1 = rnorm(nOutcomes, mean = trueLogRrDb1, sd = seLogRrDb1),
+    logRrDb2 = rnorm(nOutcomes, mean = trueLogRrDb2, sd = seLogRrDb2)
+  )
+dataLong <- simulatedDataWide %>%
+  select(outcomeId, logRrDb1, seLogRrDb1, logRrDb2, seLogRrDb2) %>%
+  pivot_longer(
+    cols = -outcomeId,
+    names_to = c(".value", "databaseId"),
+    names_pattern = "(.+)(Db[12])"
+  )
+print(head(dataLong))
+
+# Real data
+dummyOutcomeIds <- estimates |>
+  distinct(targetId, comparatorId, outcomeId) |>
+  arrange(targetId, comparatorId, outcomeId) |>
+  mutate(dummyOutcomeId = row_number())
+
+dataLong<- estimates |>
+  # filter(analysisName == "unadjusted") |>
+  filter(analysisName != "unadjusted") |>
+  inner_join(dummyOutcomeIds, by = join_by(targetId, comparatorId, outcomeId)) |>
+  select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
+
+
+# The formula now models logRr, accounting for measurement error via se(seLogRr).
+# - `0 + databaseId`: This estimates the average logRr for each databaseId (μ1, μ2) without a global intercept.
+# - `(0 + databaseId | outcomeId)`: This is the key part. It allows the effect for each
+#   outcome to vary from the database average. Crucially, it estimates the
+#   correlation between these outcome-specific variations across the databases.
+#   This correlation is our parameter of interest, rho (ρ).
+modelFormula <- bf(logRr | se(seLogRr) ~ 0 + databaseId + (0 + databaseId | outcomeId))
+
+# Set weakly informative priors for the new model parameters.
+# 'b': The fixed effects (the average logRRs for each databaseId).
+# 'sd': The standard deviations of the outcome-specific effects (σ1, σ2).
+# 'cor': The correlation matrix for the outcome-specific effects (contains ρ).
+priors <- c(
+  prior(normal(0, 2), class = "b"),
+  prior(exponential(1), class = "sd"),
+  prior(lkj(1), class = "cor")
+)
+
+# Fit the Bayesian model.
+# This might take a few minutes to run.
+correlationModelFit <- brm(
+  formula = modelFormula,
+  data = dataLong,
+  prior = priors,
+  chains = 4,
+  iter = 11000,
+  warmup = 1000,
+  cores = parallel::detectCores(),
+  control = list(adapt_delta = 0.95)
+)
+
+print(summary(correlationModelFit))
+results <- summary(correlationModelFit)$random[[1]]
+results$name <- rownames(results)
+rownames(results) <- NULL
+results <- results |>
+  filter(grepl("^cor", name)) |>
+  mutate(databaseId1 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z]+),databaseId([a-zA-Z]+)\\)", group = 1),
+         databaseId2 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z]+),databaseId([a-zA-Z]+)\\)", group = 2)) |>
+  select(databaseId1, databaseId2, rho = Estimate, lb = "l-95% CI", ub = "u-95% CI")
+
+fullMatrix <- bind_rows(results,
+            results |>
+              mutate(temp = databaseId1,
+                     databaseId1 = databaseId2,
+                     databaseId2 = temp),
+          tibble(
+            databaseId1 = unique(c(results$databaseId1, results$databaseId2)),
+            databaseId2 = databaseId1,
+            rho = 1
+          )) |>
+  select(-temp)
+fullMatrix <- fullMatrix |>
+  pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "rho", names_sort = TRUE)
+# readr::write_csv(fullMatrix, "LegendDbCorrelationUnadjusted.csv")
+readr::write_csv(fullMatrix, "LegendDbCorrelationPsMatching.csv")
+
+
+posteriorSamples <- posterior_samples(correlationModelFit, pars = "cor_outcomeId__databaseIdDb1__databaseIdDb2")
+colnames(posteriorSamples) <- "rho"
+posteriorMedian <- median(posteriorSamples$rho)
+credibleInterval <- quantile(posteriorSamples$rho, probs = c(0.025, 0.975))
+
+cat("\n--- Final Results ---\n")
+cat("Posterior Median for Correlation (ρ):", round(posteriorMedian, 3), "\n")
+cat("95% Credible Interval for Correlation (ρ): [", round(credibleInterval[1], 3), ",", round(credibleInterval[2], 3), "]\n")
+cat("The true value used in the simulation was:", trueRho, "\n")
+
+
+# Visualize the posterior distribution of the correlation parameter.
+ggplot(posteriorSamples, aes(x = rho)) +
+  geom_density(fill = "skyblue", alpha = 0.7) +
+  geom_vline(xintercept = posteriorMedian, color = "blue", linetype = "dashed", size = 1) +
+  geom_vline(xintercept = credibleInterval, color = "red", linetype = "dotted") +
+  labs(
+    title = "Posterior Distribution of the Correlation (ρ)",
+    subtitle = paste0("Median: ", round(posteriorMedian, 2),
+                      ", 95% CrI: [", round(credibleInterval[1], 2), ", ", round(credibleInterval[2], 2), "]"),
+    x = "Correlation (ρ)",
+    y = "Density"
+  ) +
+  theme_minimal()
