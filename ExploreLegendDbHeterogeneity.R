@@ -220,12 +220,11 @@ ggsave(sprintf("TauDistributions_%s.png", legendLabel), width = 6, height = 5)
 # Plot tau posterior -------------------------------------------------------------------------------
 tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
 
-
 x <- seq(from = 0, to = max(tauSample), length.out = 100)
 priorData <- tibble(
   tau = c(x, x),
   y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
-  Prior = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+  `Half-normal` = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
 )
 
 vizData <- list()
@@ -240,22 +239,18 @@ for (i in seq_along(tauSamples)) {
 vizData <- bind_rows(vizData)
 ggplot(vizData, aes(x = tau)) +
   geom_density(fill = "#3f845a", alpha = 0.75) +
-  geom_line(aes(y = y, linetype = Prior), data = priorData) +
+  geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
   scale_x_continuous("Tau") +
+  scale_y_continuous("Density") +
   scale_linetype_manual(values = c("dashed", "dotted")) +
-  facet_grid(analysisName ~ negativeControl) +
-  theme(
-    panel.grid.major.x = element_blank(),
-    panel.grid.minor.x = element_blank(),
-    axis.ticks.x = element_blank(),
-    axis.text.x = element_blank()
-  )
+  facet_grid(analysisName ~ negativeControl)
 ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
 
 # Compute correlation matrix between databases using Bayesian model --------------------------------
 library(brms)
 library(dplyr)
 library(tidyr)
+
 
 # Simulation
 set.seed(42)
@@ -290,6 +285,7 @@ dataLong <- simulatedDataWide %>%
 print(head(dataLong))
 
 # Real data
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 analysisName <- "PS matching"
 
 atLeast3Dbs <- estimates |>
@@ -360,31 +356,30 @@ fullMatrix <- bind_rows(results,
   select(-temp)
 fullMatrix <- fullMatrix |>
   pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "rho", names_sort = TRUE)
-# readr::write_csv(fullMatrix, "LegendDbCorrelationUnadjusted.csv")
-readr::write_csv(fullMatrix, "LegendDbCorrelationPsMatching.csv")
+readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", analysisName), legendLabel))
 
-
-posteriorSamples <- posterior_samples(correlationModelFit, pars = "cor_outcomeId__databaseIdDb1__databaseIdDb2")
-colnames(posteriorSamples) <- "rho"
-posteriorMedian <- median(posteriorSamples$rho)
-credibleInterval <- quantile(posteriorSamples$rho, probs = c(0.025, 0.975))
-
-cat("\n--- Final Results ---\n")
-cat("Posterior Median for Correlation (ρ):", round(posteriorMedian, 3), "\n")
-cat("95% Credible Interval for Correlation (ρ): [", round(credibleInterval[1], 3), ",", round(credibleInterval[2], 3), "]\n")
-cat("The true value used in the simulation was:", trueRho, "\n")
-
-
-# Visualize the posterior distribution of the correlation parameter.
-ggplot(posteriorSamples, aes(x = rho)) +
-  geom_density(fill = "skyblue", alpha = 0.7) +
-  geom_vline(xintercept = posteriorMedian, color = "blue", linetype = "dashed", size = 1) +
-  geom_vline(xintercept = credibleInterval, color = "red", linetype = "dotted") +
-  labs(
-    title = "Posterior Distribution of the Correlation (ρ)",
-    subtitle = paste0("Median: ", round(posteriorMedian, 2),
-                      ", 95% CrI: [", round(credibleInterval[1], 2), ", ", round(credibleInterval[2], 2), "]"),
-    x = "Correlation (ρ)",
-    y = "Density"
-  ) +
-  theme_minimal()
+#
+# posteriorSamples <- posterior_samples(correlationModelFit, pars = "cor_outcomeId__databaseIdDb1__databaseIdDb2")
+# colnames(posteriorSamples) <- "rho"
+# posteriorMedian <- median(posteriorSamples$rho)
+# credibleInterval <- quantile(posteriorSamples$rho, probs = c(0.025, 0.975))
+#
+# cat("\n--- Final Results ---\n")
+# cat("Posterior Median for Correlation (ρ):", round(posteriorMedian, 3), "\n")
+# cat("95% Credible Interval for Correlation (ρ): [", round(credibleInterval[1], 3), ",", round(credibleInterval[2], 3), "]\n")
+# cat("The true value used in the simulation was:", trueRho, "\n")
+#
+#
+# # Visualize the posterior distribution of the correlation parameter.
+# ggplot(posteriorSamples, aes(x = rho)) +
+#   geom_density(fill = "skyblue", alpha = 0.7) +
+#   geom_vline(xintercept = posteriorMedian, color = "blue", linetype = "dashed", size = 1) +
+#   geom_vline(xintercept = credibleInterval, color = "red", linetype = "dotted") +
+#   labs(
+#     title = "Posterior Distribution of the Correlation (ρ)",
+#     subtitle = paste0("Median: ", round(posteriorMedian, 2),
+#                       ", 95% CrI: [", round(credibleInterval[1], 2), ", ", round(credibleInterval[2], 2), "]"),
+#     x = "Correlation (ρ)",
+#     y = "Density"
+#   ) +
+#   theme_minimal()
