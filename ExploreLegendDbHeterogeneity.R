@@ -6,7 +6,7 @@ library(dplyr)
 library(ggplot2)
 library(ggh4x)
 
-# Fetch negative control estimates from LEGEND T2DM ------------------------------------------------
+# Fetch estimates from LEGEND T2DM -----------------------------------------------------------------
 connectionDetails <- createConnectionDetails(
   dbms = "postgresql",
   server = paste(keyring::key_get("ohdsiPostgresServer"),
@@ -14,8 +14,6 @@ connectionDetails <- createConnectionDetails(
   user = keyring::key_get("ohdsiPostgresUser"),
   password = keyring::key_get("ohdsiPostgresPassword")
 )
-
-# schema <- "legendt2dm_drug_results"
 schema <- "legendt2dm_class_results_v2"
 
 # executeSql(connection, "COMMIT;")
@@ -59,9 +57,11 @@ estimates <- estimates |>
          comparatorName = as.factor(gsub(" main ot2", "", comparatorName)),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
+legendLabel <- "T2dm"
+saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 
-# Fetch negative control estimates from LEGEND Hypertension ----------------------------------------
+# Fetch estimates from LEGEND Hypertension ---------------------------------------------------------
 connectionDetails <- createConnectionDetails(
   dbms = "postgresql",
   server = paste(keyring::key_get("ohdsiPostgresServer"),
@@ -69,10 +69,8 @@ connectionDetails <- createConnectionDetails(
   user = keyring::key_get("ohdsiPostgresUser"),
   password = keyring::key_get("ohdsiPostgresPassword")
 )
-
 schema <- "legend"
 
-# executeSql(connection, "COMMIT;")
 connection <- connect(connectionDetails)
 negativeControlIds <- renderTranslateQuerySql(
   connection = connection,
@@ -80,8 +78,14 @@ negativeControlIds <- renderTranslateQuerySql(
   schema = schema,
   snakeCaseToCamelCase = TRUE
 )[, 1]
+outcomeOfInterestIds <- renderTranslateQuerySql(
+  connection = connection,
+  sql = "SELECT outcome_id FROM @schema.outcome_of_interest;",
+  schema = schema,
+  snakeCaseToCamelCase = TRUE
+)[, 1]
 sql <- "
-SELECT database_id,
+SELECT DISTINCT database_id,
     target_id,
     target.exposure_name AS target_name,
     comparator_id,
@@ -94,17 +98,24 @@ SELECT database_id,
 FROM @schema.cohort_method_result
 INNER JOIN @schema.single_exposure_of_interest target
   ON target_id = target.exposure_id
+INNER JOIN @schema.exposure_group target_group
+  ON target_group.exposure_id = target.exposure_id
 INNER JOIN @schema.single_exposure_of_interest comparator
   ON comparator_id = comparator.exposure_id
+INNER JOIN @schema.exposure_group comparator_group
+  ON comparator_group.exposure_id = comparator.exposure_id
 WHERE se_log_rr IS NOT NULL
     AND analysis_id IN (1, 3)
-    AND database_id 1= 'Meta-analysis';
+    AND target_group.exposure_group = 'Drug class'
+    AND comparator_group.exposure_group = 'Drug class'
+    AND outcome_id IN (@outcome_ids)
+    AND database_id != 'Meta-analysis';
 "
 estimates <- renderTranslateQuerySql(connection = connection,
                                      sql = sql,
                                      schema = schema,
+                                     outcome_ids = c(negativeControlIds, outcomeOfInterestIds),
                                      snakeCaseToCamelCase = TRUE)
-# estimates <- estimates |> filter(databaseId != "Meta-analysis")
 estimates <- estimates |>
   mutate(databaseId = as.factor(databaseId),
          analysisName = as.factor(analysisName),
@@ -112,13 +123,24 @@ estimates <- estimates |>
          comparatorName = as.factor(comparatorName),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
-
+legendLabel <- "Htn"
+saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 # Compute tau -----------------------------------------------------------------------
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
+atLeast3Dbs <- estimates |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
+  summarise(nDatabases = n(), .groups = "drop") |>
+  filter(nDatabases >= 3)
+
 groups <- estimates |>
+  inner_join(
+    atLeast3Dbs,
+    by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
+  ) |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)|>
   group_split()
-
 
 # group = groups[[1]]
 computeTau <- function(group) {
@@ -126,24 +148,44 @@ computeTau <- function(group) {
     head(1) |>
     select(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
   maEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
+  traces <- attr(maEstimate, "traces")
+  tauSample <- sample(traces[, 2], 100)
   row <- keyRow |>
     mutate(tau = maEstimate$tau,
            tau95Lb = maEstimate$tau95Lb,
            tau95Ub = maEstimate$tau95Ub)
-  return(row)
+  return(list(row = row, tauSample = tauSample))
 }
 
 cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
-taus <- ParallelLogger::clusterApply(cluster, groups, computeTau)
+tauRowsAndSamples <- ParallelLogger::clusterApply(cluster, groups, computeTau)
 ParallelLogger::stopCluster(cluster)
 
-taus <- bind_rows(taus)
-# saveRDS(taus, "taus.rds")
-saveRDS(taus, "tausHtn.rds")
+taus <- bind_rows(lapply(tauRowsAndSamples, function(x) x$row))
+groups <- taus |>
+  distinct(analysisName, negativeControl)
+tauSamples <- list()
+for (i in seq_len(nrow(groups))) {
+  row <- groups[i, ]
+  fun <- function(x) {
+    if (x$row$analysisName == row$analysisName && x$row$negativeControl == row$negativeControl) {
+      return(x$tauSample)
+    } else {
+      return(c())
+    }
+  }
+  tauSample <- do.call(c, lapply(tauRowsAndSamples, fun))
+  tauSample <- sample(tauSample, 10000)
+  tauSamples[[sprintf("%s-%s", row$analysisName, row$negativeControl)]] <- tauSample
+}
+
+saveRDS(taus, sprintf("taus_%s.rds", legendLabel))
+saveRDS(tauSamples, sprintf("tauSamples_%s.rds", legendLabel))
+
 
 # Plot tau distributions ---------------------------------------------------------------------------
-taus <- readRDS("taus.rds")
+taus <- readRDS(sprintf("taus_%s.rds", legendLabel))
 
 taus |>
   mutate(se = (tau95Ub - tau95Lb) / 2*qnorm(0.975)) |>
@@ -173,22 +215,49 @@ ggplot(vizData, aes(y = tau)) +
     axis.ticks.x = element_blank(),
     axis.text.x = element_blank()
   )
-ggsave("TauDistributions.png", width = 6, height = 5)
+ggsave(sprintf("TauDistributions_%s.png", legendLabel), width = 6, height = 5)
 
-# Compute correlations between databases based on their estimates ----------------------------------
-# Bayesian Hierarchical Model to Estimate Correlation Between Database Estimates
-# This code uses the 'brms' package in R.
+# Plot tau posterior -------------------------------------------------------------------------------
+tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
 
-# --- 1. SETUP: Install and load necessary packages ---
-# If you don't have these packages, uncomment the lines below to install them.
-# install.packages("brms")
-# install.packages("tidyverse")
 
+x <- seq(from = 0, to = max(tauSample), length.out = 100)
+priorData <- tibble(
+  tau = c(x, x),
+  y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
+  Prior = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+)
+
+vizData <- list()
+for (i in seq_along(tauSamples)) {
+  row <- strsplit(names(tauSamples[i]), "-")[[1]]
+  names(row) <- c("analysisName", "negativeControl")
+  row <- as_tibble(t(row)) |>
+    mutate(negativeControl = if_else(negativeControl == "TRUE", "Negative control", "Outcome of interest"),
+           analysisName = if_else(analysisName == "unadjusted", "Unadjusted", analysisName))
+  vizData[[i]] <- bind_cols(row, tibble(tau = tauSamples[[i]]))
+}
+vizData <- bind_rows(vizData)
+ggplot(vizData, aes(x = tau)) +
+  geom_density(fill = "#3f845a", alpha = 0.75) +
+  geom_line(aes(y = y, linetype = Prior), data = priorData) +
+  scale_x_continuous("Tau") +
+  scale_linetype_manual(values = c("dashed", "dotted")) +
+  facet_grid(analysisName ~ negativeControl) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
+
+# Compute correlation matrix between databases using Bayesian model --------------------------------
 library(brms)
 library(dplyr)
 library(tidyr)
 
-# SImulation
+# Simulation
 set.seed(42)
 nOutcomes <- 50
 trueMu1 <- 0.1  # True average log(RR) for Db1
@@ -221,15 +290,19 @@ dataLong <- simulatedDataWide %>%
 print(head(dataLong))
 
 # Real data
-dummyOutcomeIds <- estimates |>
-  distinct(targetId, comparatorId, outcomeId) |>
+analysisName <- "PS matching"
+
+atLeast3Dbs <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  group_by(targetId, comparatorId, outcomeId) |>
+  summarise(n = n(), .groups = "drop") |>
+  filter(n >= 3) |>
   arrange(targetId, comparatorId, outcomeId) |>
   mutate(dummyOutcomeId = row_number())
 
 dataLong<- estimates |>
-  # filter(analysisName == "unadjusted") |>
-  filter(analysisName != "unadjusted") |>
-  inner_join(dummyOutcomeIds, by = join_by(targetId, comparatorId, outcomeId)) |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(atLeast3Dbs, by = join_by(targetId, comparatorId, outcomeId)) |>
   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
 
 
@@ -275,15 +348,15 @@ results <- results |>
   select(databaseId1, databaseId2, rho = Estimate, lb = "l-95% CI", ub = "u-95% CI")
 
 fullMatrix <- bind_rows(results,
-            results |>
-              mutate(temp = databaseId1,
-                     databaseId1 = databaseId2,
-                     databaseId2 = temp),
-          tibble(
-            databaseId1 = unique(c(results$databaseId1, results$databaseId2)),
-            databaseId2 = databaseId1,
-            rho = 1
-          )) |>
+                        results |>
+                          mutate(temp = databaseId1,
+                                 databaseId1 = databaseId2,
+                                 databaseId2 = temp),
+                        tibble(
+                          databaseId1 = unique(c(results$databaseId1, results$databaseId2)),
+                          databaseId2 = databaseId1,
+                          rho = 1
+                        )) |>
   select(-temp)
 fullMatrix <- fullMatrix |>
   pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "rho", names_sort = TRUE)
