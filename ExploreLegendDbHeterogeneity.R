@@ -128,6 +128,75 @@ legendLabel <- "Htn"
 minDatabases <- 6
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
+
+# Fetch estimates from ASD-004 SCCS --------------------------------------------
+connectionDetails <- DatabaseConnector::createConnectionDetails(
+  dbms = "postgresql",
+  server = keyring::key_get("ohdaResultsServer"),
+  user = keyring::key_get("ohdaResultsUser"),
+  password = keyring::key_get("ohdaResultsPassword")
+)
+schema <- "asd_004"
+
+connection <- connect(connectionDetails)
+sql <- "SELECT c.era_id,
+  outcome_id,
+  nesting_cohort_id,
+  unblind_for_evidence_synthesis AS unblind,
+  r.analysis_id,
+  a.description AS analysis_name,
+  d.cdm_source_abbreviation AS database_name,
+  CASE WHEN true_effect_size = 1 THEN 1 ELSE 0 END AS negative_control,
+  log_rr,
+  se_log_rr
+FROM @schema.sccs_result r
+INNER JOIN @schema.sccs_diagnostics_summary ds
+  ON ds.exposures_outcome_set_id = r.exposures_outcome_set_id
+    AND ds.covariate_id = r.covariate_id
+    AND ds.analysis_id = r.analysis_id
+    AND ds.database_id = r.database_id
+INNER JOIN @schema.sccs_exposures_outcome_set eos
+  ON ds.exposures_outcome_set_id = eos.exposures_outcome_set_id
+INNER JOIN (
+  SELECT DISTINCT exposures_outcome_set_id,
+    covariate_id,
+    analysis_id,
+    era_id
+  FROM @schema.sccs_covariate
+  ) c
+  ON ds.exposures_outcome_set_id = c.exposures_outcome_set_id
+    AND ds.covariate_id = c.covariate_id
+    AND ds.analysis_id = c.analysis_id
+INNER JOIN @schema.cg_cohort_definition cd
+  ON eos.outcome_id = cd.cohort_definition_id
+INNER JOIN @schema.sccs_analysis a
+  ON r.analysis_id = a.analysis_id
+INNER JOIN @schema.database_meta_data d
+  ON r.database_id = d.database_id
+INNER JOIN @schema.sccs_exposure e
+  ON r.exposures_outcome_set_id = e.exposures_outcome_set_id
+    AND c.era_id = e.era_id
+WHERE se_log_rr IS NOT NULL;"
+estimates <- renderTranslateQuerySql(connection = connection,
+                                     sql = sql,
+                                     schema = schema,
+                                     snakeCaseToCamelCase = TRUE)
+estimates <- estimates |>
+  transmute(databaseId = as.factor(databaseName),
+         analysisName = as.factor(analysisName),
+         targetId = eraId,
+         targetName = as.factor(eraId),
+         comparatorId = eraId,
+         comparatorName = as.factor(eraId),
+         outcomeId = outcomeId,
+         negativeControl = negativeControl == 1,
+         logRr,
+         seLogRr)
+disconnect(connection)
+legendLabel <- "Sccs"
+minDatabases <- 6
+saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
+
 # Compute tau -----------------------------------------------------------------------
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
