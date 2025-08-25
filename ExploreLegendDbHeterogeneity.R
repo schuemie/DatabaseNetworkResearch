@@ -248,6 +248,7 @@ ggplot(vizData, aes(x = tau)) +
   coord_cartesian(xlim = c(0,2)) +
   facet_grid(analysisName ~ negativeControl)
 ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
+# ggsave(sprintf("TauPosteriorsCalibrated_%s.png", legendLabel), width = 6, height = 5)
 
 # Compute correlation matrix between databases using Bayesian model --------------------------------
 library(brms)
@@ -387,3 +388,95 @@ readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", 
 #     y = "Density"
 #   ) +
 #   theme_minimal()
+
+
+# Compute tau for calibrated estimates -------------------------------------------------------------
+# We shouldn't really do this as systematic error will be correlated between databases, but it can
+# give a rough idea of how much heterogeneity remains once we adjust for measured systematic error
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
+atLeastNdbs <- estimates |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
+  summarise(nDatabases = n(), .groups = "drop") |>
+  filter(nDatabases >= minDatabases)
+
+groups <- estimates |>
+  inner_join(
+    atLeastNdbs,
+    by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
+  ) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, analysisName)|>
+  group_split()
+
+# group = groups[[1]]
+computeTau <- function(group) {
+  ncs <- group |>
+    filter(negativeControl)
+  null <- EmpiricalCalibration::fitNull(ncs$logRr, ncs$seLogRr)
+  estimates <- EmpiricalCalibration::calibrateConfidenceInterval(
+    group$logRr,
+    group$seLogRr,
+    EmpiricalCalibration::convertNullToErrorModel(null)
+  )
+  estimates <- group |>
+    select(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
+    bind_cols(estimates)
+
+  outcomeGroups <- estimates |>
+    group_by(outcomeId) |>
+    group_split()
+
+  tauSamplesNcs <- list()
+  tauSamplesHois <- list()
+  rows <- list()
+  # i = 1
+  for (i in seq_along(outcomeGroups)) {
+    outcomeGroup = outcomeGroups[[i]]
+    keyRow <- outcomeGroup |>
+      head(1) |>
+      select(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
+    maEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(outcomeGroup, showProgressBar = FALSE)
+    traces <- attr(maEstimate, "traces")
+    tauSample <- sample(traces[, 2], 100)
+    row <- keyRow |>
+      mutate(tau = maEstimate$tau,
+             tau95Lb = maEstimate$tau95Lb,
+             tau95Ub = maEstimate$tau95Ub)
+    rows[[i]] <- row
+    if (keyRow$negativeControl) {
+      tauSamplesNcs[[length(tauSamplesNcs) + 1]] <- tauSample
+    } else {
+      tauSamplesHois[[length(tauSamplesHois) + 1]] <- tauSample
+    }
+  }
+  return(list(row = bind_rows(rows),
+              tauSampleNcs = do.call(c, tauSamplesNcs),
+              tauSampleHois = do.call(c, tauSamplesHois)))
+}
+
+
+
+cluster <- ParallelLogger::makeCluster(10)
+ParallelLogger::clusterRequire(cluster, "dplyr")
+tauRowsAndSamples <- ParallelLogger::clusterApply(cluster, groups, computeTau)
+ParallelLogger::stopCluster(cluster)
+
+taus <- bind_rows(lapply(tauRowsAndSamples, function(x) x$row))
+tauSamples <- list()
+for (i in seq_along(tauRowsAndSamples)) {
+  key <- sprintf("%s-%s", tauRowsAndSamples[[i]]$row$analysisName[1], TRUE)
+  tauSamples[[key]] <- c(tauSamples[[key]], tauRowsAndSamples[[i]]$tauSampleNcs)
+  key <- sprintf("%s-%s", tauRowsAndSamples[[i]]$row$analysisName[1], FALSE)
+  tauSamples[[key]] <- c(tauSamples[[key]], tauRowsAndSamples[[i]]$tauSampleHois)
+}
+for (key in names(tauSamples)) {
+  tauSamples[[key]] <- sample(tauSamples[[key]], 10000)
+}
+
+saveRDS(taus, sprintf("tausCalibrated_%s.rds", legendLabel))
+saveRDS(tauSamples, sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
+
+
+# tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
+# median(tauSamples[[1]])
+# tauSamples <- readRDS(sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
