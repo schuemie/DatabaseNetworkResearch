@@ -58,6 +58,7 @@ estimates <- estimates |>
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
 legendLabel <- "T2dm"
+minDatabases <- 3
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 
@@ -124,19 +125,20 @@ estimates <- estimates |>
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
 legendLabel <- "Htn"
+minDatabases <- 6
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 # Compute tau -----------------------------------------------------------------------
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
-atLeast3Dbs <- estimates |>
+atLeastNdbs <- estimates |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
   summarise(nDatabases = n(), .groups = "drop") |>
-  filter(nDatabases >= 3)
+  filter(nDatabases >= minDatabases)
 
 groups <- estimates |>
   inner_join(
-    atLeast3Dbs,
+    atLeastNdbs,
     by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
   ) |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)|>
@@ -286,19 +288,20 @@ print(head(dataLong))
 
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-analysisName <- "PS matching"
+analysisName <- unique(estimates$analysisName)[2]
+analysisName
 
-atLeast3Dbs <- estimates |>
+atLeastNddbs <- estimates |>
   filter(analysisName == !!analysisName) |>
   group_by(targetId, comparatorId, outcomeId) |>
   summarise(n = n(), .groups = "drop") |>
-  filter(n >= 3) |>
+  filter(n >= minDatabases) |>
   arrange(targetId, comparatorId, outcomeId) |>
   mutate(dummyOutcomeId = row_number())
 
 dataLong<- estimates |>
   filter(analysisName == !!analysisName) |>
-  inner_join(atLeast3Dbs, by = join_by(targetId, comparatorId, outcomeId)) |>
+  inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
 
 
