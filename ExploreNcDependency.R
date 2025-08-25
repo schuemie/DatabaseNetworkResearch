@@ -167,9 +167,11 @@ databases <- ncEstimates |>
 
 
 plotFigure <- function(targetName, comparatorName) {
+  # Analysis ID 7 is unadjusted (no PS adjustment)
+  # Keeping only estimates with SE < 0.25 to get rid of noise due to random error
   vizData <- ncEstimates |>
     filter(analysisId == 7, targetName == !!targetName, comparatorName == !!comparatorName) |>
-    filter(seLogRr < 0.8) |>
+    filter(seLogRr < 0.25) |>
     inner_join(databases, by = join_by(databaseId)) |>
     mutate(y = y + seLogRr) |>
     arrange(outcomeId, databaseId)
@@ -183,6 +185,7 @@ plotFigure <- function(targetName, comparatorName) {
     geom_path(, alpha = 0.35) +
     scale_x_continuous("Hazard Ratio", breaks = log(breaks), labels = breaks) +
     scale_y_continuous("Standard Error", breaks = databases$y + 0.5, labels = databases$databaseId) +
+    coord_cartesian(xlim = c(log(0.25), log(4)), ylim = c(min(databases$y), max(databases$y) + 0.99)) +
     ggtitle(sprintf("%s - %s", targetName, comparatorName)) +
     theme(panel.grid.major = element_blank(),
           panel.grid.minor = element_blank(),
@@ -199,77 +202,3 @@ ggsave("NcEstimatesAcrossDbsGLP1RA_SU.png", width = 10, height = 6, dpi = 300)
 
 plotFigure("DPP4I", "GLP1RA")
 ggsave("NcEstimatesAcrossDbsDPP4I_GLP1RA.png", width = 10, height = 6, dpi = 300)
-
-# Martijn's dumb model -----------------------------------------------------------------------------
-targetName <- "DPP4I"
-comparatorName <- "GLP1RA"
-databases <- ncEstimates |>
-  distinct(databaseId) |>
-  arrange(databaseId) |>
-  mutate(databaseIndex = row_number())
-outcomes <- ncEstimates |>
-  distinct(outcomeId) |>
-  arrange(outcomeId) |>
-  mutate(outcomeIndex = row_number())
-subset <- ncEstimates |>
-  filter(analysisId == 7, targetName == !!targetName, comparatorName == !!comparatorName) |>
-  inner_join(databases, by= join_by(databaseId)) |>
-  inner_join(outcomes, by= join_by(outcomeId))
-
-gaussianProduct <- function(mu1, mu2, sd1, sd2) {
-  (2 * pi)^(-1 / 2) * (sd1^2 + sd2^2)^(-1 / 2) * exp(-(mu1 - mu2)^2 / (2 * (sd1^2 + sd2^2)))
-}
-
-# Like in EmpiricalCalibration: use precision instead of SD for nicer properties:
-transform <- function(p) {
-  return(1/sqrt(p))
-}
-
-# Parameter vector:
-p <- rep(c(0, 0.1), nrow(databases) + nrow(outcomes))
-offsetOutcomes <- nrow(databases) * 2
-precisionIndex <- seq_len(length(p) / 2) * 2
-
-logLikelihood <- function(p) {
-  if (any(p[precisionIndex] <= 0)) {
-    return(Inf)
-  }
-  ll <- 0
-  for (i in seq_len(nrow(subset))) {
-    row <- subset[i, ]
-    ll <- ll - log(gaussianProduct(row$logRr, p[row$databaseIndex * 2 - 1], row$seLogRr, transform(p[row$databaseIndex * 2])))
-    ll <- ll - log(gaussianProduct(row$logRr, p[offsetOutcomes + row$outcomeIndex * 2 - 1], row$seLogRr, transform(p[offsetOutcomes + row$outcomeIndex * 2])))
-  }
-  print(ll)
-  return(ll)
-}
-fit <- nlm(logLikelihood, p, iterlim = 1000, steptol = 1e-8, gradtol = 1e-8)
-saveRDS(fit, "DualModelFit.rds")
-fit <- readRDS("DualModelFit.rds")
-
-# Compare database bias distributions from full model to per-database modesl:
-ccaeEstimates <- subset |>
-  filter(databaseId == "CCAE")
-ccaeNull <- EmpiricalCalibration::fitNull(ccaeEstimates$logRr, ccaeEstimates$seLogRr)
-ccaeNull
-c(fit$estimate[1], transform(fit$estimate[2]))
-
-mdcrEstimates <- subset |>
-  filter(databaseId == "MDCR")
-mdcrNull <- EmpiricalCalibration::fitNull(mdcrEstimates$logRr, mdcrEstimates$seLogRr)
-mdcrNull
-c(fit$estimate[5], transform(fit$estimate[6]))
-
-# Output single NC estimate's random effect model:
-outcomeId <- subset |>
-  arrange(seLogRr) |>
-  head(1) |>
-  pull(outcomeId)
-
-idx <- outcomes |>
-  filter(outcomeId == !!outcomeId) |>
-  pull(outcomeIndex)
-
-c(fit$estimate[offsetOutcomes + idx * 2 - 1], transform(fit$estimate[offsetOutcomes + idx * 2]))
-subset |>
-  filter(outcomeId == !!outcomeId)

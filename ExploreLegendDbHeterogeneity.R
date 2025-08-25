@@ -222,7 +222,7 @@ ggsave(sprintf("TauDistributions_%s.png", legendLabel), width = 6, height = 5)
 # Plot tau posterior -------------------------------------------------------------------------------
 tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
 
-x <- seq(from = 0, to = max(tauSample), length.out = 100)
+x <- seq(from = 0, to = 2, length.out = 100)
 priorData <- tibble(
   tau = c(x, x),
   y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
@@ -245,6 +245,7 @@ ggplot(vizData, aes(x = tau)) +
   scale_x_continuous("Tau") +
   scale_y_continuous("Density") +
   scale_linetype_manual(values = c("dashed", "dotted")) +
+  coord_cartesian(xlim = c(0,2)) +
   facet_grid(analysisName ~ negativeControl)
 ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
 
