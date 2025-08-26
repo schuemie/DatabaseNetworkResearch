@@ -183,21 +183,21 @@ estimates <- renderTranslateQuerySql(connection = connection,
                                      snakeCaseToCamelCase = TRUE)
 estimates <- estimates |>
   transmute(databaseId = as.factor(databaseName),
-         analysisName = as.factor(analysisName),
-         targetId = eraId,
-         targetName = as.factor(eraId),
-         comparatorId = eraId,
-         comparatorName = as.factor(eraId),
-         outcomeId = outcomeId,
-         negativeControl = negativeControl == 1,
-         logRr,
-         seLogRr)
+            analysisName = as.factor(analysisName),
+            targetId = eraId,
+            targetName = as.factor(eraId),
+            comparatorId = eraId,
+            comparatorName = as.factor(eraId),
+            outcomeId = outcomeId,
+            negativeControl = negativeControl == 1,
+            logRr,
+            seLogRr)
 disconnect(connection)
 legendLabel <- "Sccs"
 minDatabases <- 6
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
-# Compute tau -----------------------------------------------------------------------
+# Compute tau --------------------------------------------------------------------------------------
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
 atLeastNdbs <- estimates |>
@@ -221,10 +221,15 @@ computeTau <- function(group) {
   maEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
   traces <- attr(maEstimate, "traces")
   tauSample <- sample(traces[, 2], 100)
-  row <- keyRow |>
-    mutate(tau = maEstimate$tau,
-           tau95Lb = maEstimate$tau95Lb,
-           tau95Ub = maEstimate$tau95Ub)
+  row <- maEstimate |>
+    select(mu, mu95Lb, mu95Ub, tau, tau95Lb, tau95Ub) |>
+    bind_cols(keyRow) |>
+    mutate(signficant = mu95Lb > 0 | mu95Ub < 0) |>
+    mutate(type = if_else(negativeControl,
+                          "Negative control",
+                          if_else(signficant,
+                                  "Outcome of interest and significant",
+                                  "Outcome of interest")))
   return(list(row = row, tauSample = tauSample))
 }
 
@@ -235,20 +240,22 @@ ParallelLogger::stopCluster(cluster)
 
 taus <- bind_rows(lapply(tauRowsAndSamples, function(x) x$row))
 groups <- taus |>
-  distinct(analysisName, negativeControl)
+  distinct(analysisName, type)
 tauSamples <- list()
 for (i in seq_len(nrow(groups))) {
   row <- groups[i, ]
   fun <- function(x) {
-    if (x$row$analysisName == row$analysisName && x$row$negativeControl == row$negativeControl) {
+    if (x$row$analysisName == row$analysisName && x$row$type == row$type) {
       return(x$tauSample)
     } else {
       return(c())
     }
   }
   tauSample <- do.call(c, lapply(tauRowsAndSamples, fun))
-  tauSample <- sample(tauSample, 10000)
-  tauSamples[[sprintf("%s-%s", row$analysisName, row$negativeControl)]] <- tauSample
+  if (length(tauSample) > 10000) {
+    tauSample <- sample(tauSample, 10000)
+  }
+  tauSamples[[sprintf("%s-%s", row$analysisName, row$type)]] <- tauSample
 }
 
 saveRDS(taus, sprintf("taus_%s.rds", legendLabel))
@@ -260,7 +267,7 @@ taus <- readRDS(sprintf("taus_%s.rds", legendLabel))
 
 taus |>
   mutate(se = (tau95Ub - tau95Lb) / 2*qnorm(0.975)) |>
-  group_by(negativeControl, analysisName) |>
+  group_by(type, analysisName) |>
   summarise(medianSe = median(se), .groups = "drop")
 
 priorTimesX <- function(x){
@@ -270,8 +277,8 @@ expectedTauUnderPrior <- integrate(priorTimesX, lower = 0, upper = Inf)$value
 
 vizData <- taus |>
   mutate(se = (tau95Ub - tau95Lb) / 2*qnorm(0.975)) |>
-  filter(se < 0.5) |>
-  mutate(negativeControl = if_else(negativeControl, "Negative control", "Outcome of interest"),
+  filter(se < 0.4) |>
+  mutate(type = gsub(" and", "\nand", type),
          analysisName = if_else(analysisName == "unadjusted", "Unadjusted", analysisName))
 
 ggplot(vizData, aes(y = tau)) +
@@ -279,7 +286,7 @@ ggplot(vizData, aes(y = tau)) +
   geom_hline(yintercept = expectedTauUnderPrior, linetype = "dashed") +
   geom_boxplot(fill = "#3f845a", alpha = 0.75) +
   scale_y_continuous("Tau") +
-  facet_nested(~ negativeControl + analysisName) +
+  facet_nested(~ type + analysisName) +
   theme(
     panel.grid.major.x = element_blank(),
     panel.grid.minor.x = element_blank(),
@@ -301,9 +308,9 @@ priorData <- tibble(
 vizData <- list()
 for (i in seq_along(tauSamples)) {
   row <- strsplit(names(tauSamples[i]), "-")[[1]]
-  names(row) <- c("analysisName", "negativeControl")
+  names(row) <- c("analysisName", "type")
   row <- as_tibble(t(row)) |>
-    mutate(negativeControl = if_else(negativeControl == "TRUE", "Negative control", "Outcome of interest"),
+    mutate(type = gsub(" and", "\nand", type),
            analysisName = if_else(analysisName == "unadjusted", "Unadjusted", analysisName))
   vizData[[i]] <- bind_cols(row, tibble(tau = tauSamples[[i]]))
 }
@@ -315,7 +322,7 @@ ggplot(vizData, aes(x = tau)) +
   scale_y_continuous("Density") +
   scale_linetype_manual(values = c("dashed", "dotted")) +
   coord_cartesian(xlim = c(0,2)) +
-  facet_grid(analysisName ~ negativeControl)
+  facet_grid(analysisName ~ type)
 ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
 # ggsave(sprintf("TauPosteriorsCalibrated_%s.png", legendLabel), width = 6, height = 5)
 
