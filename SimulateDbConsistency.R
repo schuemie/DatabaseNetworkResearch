@@ -16,6 +16,7 @@ library(ggplot2)
 #' @param nCaptureProcessChars    Number of data capture process characteristics.
 #' @param bias0                   Baseline bias.
 #' @param biasCpcSd               SD of the bias associated with each data capture characteristic.
+#' @param doOvers                 How often the study is repeated until p < 0.05. (Publication bias)
 #'
 #' @returns
 #' A setting object
@@ -29,10 +30,9 @@ createSimulationSettings <- function(
     seLogRrs = runif(nDatabases, 0.05, 0.25),
     nCaptureProcessChars = 4,
     bias0 = 0.1,
-    biasCpcSd = 0.5
+    biasCpcSd = 0.5,
+    doOvers = 1
 ) {
-
-
   args <- list()
   for (name in names(formals())) {
     args[[name]] <- get(name)
@@ -54,38 +54,53 @@ simulateOne <- function(seed, settings) {
                               settings$trueSubgroupLogRrsMean,
                               settings$trueSubgroupLogRrsSd)
   trueTargetLogRr <- sum(targetMixture * trueSubgroupLogRrs)
-
-  databaseMixtures <- matrix(runif(nDatabasesPlusOne * settings$nSubgroups),
-                             nrow = nDatabasesPlusOne,
-                             ncol = settings$nSubgroups)
-  databaseMixtures <- databaseMixtures / rowSums(databaseMixtures) # Subgroup mixture per database
-  trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
-
-  databaseCpChars = matrix(rbinom(nDatabasesPlusOne * settings$nCaptureProcessChars, 1, 0.1),
-                           nrow = nDatabasesPlusOne,
-                           ncol = settings$nCaptureProcessChars) # Data capture process characteristics per DB (binary)
   biasCpc <- rnorm(settings$nCaptureProcessChars, 0, settings$biasCpcSd) # Bias associated with each data capture process characteristic.
-  databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
 
-  # Observed effects:
-  databaseLogRrs <- rnorm(nDatabasesPlusOne, trueDatabaseLogRr + databaseBias, seLogRrs)
+  minP <- 1
+  nStudies <- 0
+  for (i in seq_len(settings$doOvers)) {
+    nStudies <- nStudies + 1
+    databaseMixtures <- matrix(runif(nDatabasesPlusOne * settings$nSubgroups),
+                               nrow = nDatabasesPlusOne,
+                               ncol = settings$nSubgroups)
+    databaseMixtures <- databaseMixtures / rowSums(databaseMixtures) # Subgroup mixture per database
+    trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
+    databaseCpChars = matrix(rbinom(nDatabasesPlusOne * settings$nCaptureProcessChars, 1, 0.1),
+                             nrow = nDatabasesPlusOne,
+                             ncol = settings$nCaptureProcessChars) # Data capture process characteristics per DB (binary)
+    databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
 
-  data <- data.frame(
-    logRr = databaseLogRrs[seq_len(settings$nDatabases)],
-    seLogRr = seLogRrs[seq_len(settings$nDatabases)]
-  )
-  lbs <- data$logRr + qnorm(0.025) * data$seLogRr
-  ubs <- data$logRr + qnorm(0.975) * data$seLogRr
-  nSignificant <- sum(lbs > 0 | ubs < 0)
+    # Observed effects:
+    databaseLogRrs <- rnorm(nDatabasesPlusOne, trueDatabaseLogRr + databaseBias, seLogRrs)
 
-  meta <- meta::metagen(data$logRr, data$seLogRr, sm = "RR", control = list(maxiter=1000, stepadj=0.5), prediction = TRUE)
+    data <- data.frame(
+      logRr = databaseLogRrs[seq_len(settings$nDatabases)],
+      seLogRr = seLogRrs[seq_len(settings$nDatabases)]
+    )
+    meta <- meta::metagen(data$logRr, data$seLogRr, sm = "RR", control = list(maxiter=1000, stepadj=0.5), prediction = TRUE)
+    p <- summary(meta)$random$p
+    if (p < minP) {
+      minP <- p
+      bestStudy <- list(databaseLogRrs = databaseLogRrs, data = data, meta = meta)
+      if (p < 0.05) {
+        break
+      }
+    }
+  }
+  databaseLogRrs <- bestStudy$databaseLogRrs
+  data <- bestStudy$data
+  meta <- bestStudy$meta
+
   s <- summary(meta)
-  feEstimate <- s$fixed
   reEstimate <- s$random
+  feEstimate <- s$fixed
   breEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE)
   traces <- attr(breEstimate, "traces")
   predictions <- rnorm(nrow(traces), traces[, 1], traces[, 2])
   predictionInterval <- HDInterval::hdi(predictions, credMass = 0.95)
+  lbs <- data$logRr + qnorm(0.025) * data$seLogRr
+  ubs <- data$logRr + qnorm(0.975) * data$seLogRr
+  nSignificant <- sum(lbs > 0 | ubs < 0)
   rows <- tibble(
     method = c("Fixed effects", "Random effects", "Bayesian random effects"),
     seed = seed,
@@ -103,7 +118,8 @@ simulateOne <- function(seed, settings) {
     replicationLogLb = replicationLogRr + qnorm(0.025) * tail(seLogRrs, 1),
     replicationLogUb = replicationLogRr + qnorm(0.975) * tail(seLogRrs, 1),
     nSignificant = nSignificant,
-    nDatabases = settings$nDatabases
+    nDatabases = settings$nDatabases,
+    nStudies = nStudies
   )
   return(rows)
 }
@@ -135,7 +151,7 @@ computePerformance <- function(results) {
       reproEstimateInPi = replicationLogRr >= logPiLb & replicationLogRr <= logPiUb,
       reproDisagreePi = oddsTest(logPiLb, (logPiLb + logPiUb) / 2, logPiUb, replicationLogLb, replicationLogRr, replicationLogUb) < 0.05,
       signPi = logPiLb > 0 | logPiUb < 0,
-      signPiReproSign = signPi & (replicationLogLb > 0 | replicationLogUb < 0)
+      signPiReproSign = signPi & (replicationLogLb > 0 | replicationLogUb < 0),
     ) |>
     group_by(method) |>
     summarise(
@@ -154,7 +170,8 @@ computePerformance <- function(results) {
       reproEstimateInPi = mean(reproEstimateInPi),
       reproDisagreePi = mean(reproDisagreePi, na.rm = TRUE),
       signPi = mean(signPi, na.rm = TRUE),
-      signPiReproSign = mean(signPiReproSign, na.rm = TRUE)
+      signPiReproSign = mean(signPiReproSign, na.rm = TRUE),
+      meanNstudies = mean(nStudies)
     )
   return(metrics)
 }
@@ -186,86 +203,53 @@ poolSes <- function(se1, se2) {
 cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
 
-# 2 DBs, non-null effect
-settings <- createSimulationSettings(
-  nDatabases = 2,
-  seLogRrs = c(0.2, 0.4),
-  trueSubgroupLogRrsMean = 1,
-  trueSubgroupLogRrsSd = 0.5
-)
-results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
-results <- bind_rows(results)
-computePerformance(results)
-# method                  precision coverage type1   type2 reproEstimateInCi reproDisagreeCi  sign signReproSign precisionPi coveragePi type1Pi type2Pi reproEstimateInPi reproDisagreePi signPi signPiReproSign
-# 1 Bayesian random effects     0.430     0.98     0 0.21                 0.83            0.07  0.79          0.56      0.169        1          0 0.69                 0.97            0      0.31            0.23
-# 2 Fixed effects               1.95      0.85     0 0.01000              0.58            0.11  0.99          0.71      1.95         0.85       0 0.01000              0.58            0.11   0.99            0.71
-# 3 Random effects              1.12      0.89     0 0.1                  0.66            0.07  0.9           0.65      0.0194       1          0 1                    1               0      0               0
+allRows <- list()
+for (nDatabases in c(1, 2, 4, 10)) {
+  for (trueEffect in c("null", "fixed", "random")) {
+    for (publicationBias in c(FALSE, TRUE)) {
+      message(sprintf("Simulating %d databases, true effect is %s, with%s publication bias",
+                      nDatabases,
+                      trueEffect,
+                      if (publicationBias) "" else " no"))
+      if (nDatabases == 1) {
+        seLogRrs <- poolSes(0.1, 0.2)
+      } else if (nDatabases == 2) {
+        seLogRrs <- c(0.1, 0.2)
+      } else {
+        seLogRrs <- runif(nDatabases, 0.05, 0.25)
+      }
+      settings <- createSimulationSettings(
+        nDatabases = nDatabases,
+        seLogRrs = seLogRrs,
+        trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(3),
+        trueSubgroupLogRrsSd = if (trueEffect == "random") 0.5 else 0,
+        doOvers = if (publicationBias) 10 else 1
+      )
+      results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
+      results <- bind_rows(results)
+      metrics <- computePerformance(results)
+      rows <- tibble(
+        nDatabases = !!nDatabases,
+        trueEffect = !!trueEffect,
+        publicationBias = !!publicationBias
+      ) |>
+        bind_cols(metrics)
+      allRows[[length(allRows) + 1]] <- rows
+    }
+  }
+}
+allRows <- bind_rows(allRows)
+readr::write_csv(allRows, "SimulationResults.csv")
 
-# 1 DB, non-null effect
-settings <- createSimulationSettings(
-  nDatabases = 1,
-  seLogRrs = poolSes(0.2, 0.4),
-  trueSubgroupLogRrsMean = 1,
-  trueSubgroupLogRrsSd = 0.5
-)
-results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
-results <- bind_rows(results)
-computePerformance(results)
-# method                  precision coverage type1 type2 reproEstimateInCi reproDisagreeCi  sign signReproSign precisionPi coveragePi type1Pi type2Pi reproEstimateInPi reproDisagreePi signPi signPiReproSign
-# 1 Bayesian random effects     0.225     0.97     0  0.59              0.92            0.07  0.41          0.4        0.109       0.99       0    0.95              0.99             0     0.05            0.05
-# 2 Fixed effects               1.95      0.66     0  0.08              0.42            0.3   0.92          0.89       1.95        0.66       0    0.08              0.42             0.3   0.92            0.89
-# 3 Random effects              1.95      0.66     0  0.08              0.42            0.3   0.92          0.89      NA          NA          0   NA                NA              NaN   NaN               0
-
-# 2 DBs, null effect
-settings <- createSimulationSettings(
-  nDatabases = 2,
-  seLogRrs = c(0.2, 0.4),
-  trueSubgroupLogRrsMean = 0,
-  trueSubgroupLogRrsSd = 0
-)
-results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
-results <- bind_rows(results)
-computePerformance(results)
-# method                  precision coverage type1 type2 reproEstimateInCi reproDisagreeCi  sign signReproSign precisionPi coveragePi type1Pi type2Pi reproEstimateInPi reproDisagreePi signPi signPiReproSign
-# 1 Bayesian random effects     0.417     0.97  0.03     0              0.79            0.06  0.03          0         0.163        1       0          0              0.96            0.02   0               0
-# 2 Fixed effects               1.95      0.75  0.25     0              0.44            0.1   0.25          0.02      1.95         0.75    0.25       0              0.44            0.1    0.25            0.02
-# 3 Random effects              0.950     0.89  0.11     0              0.61            0.07  0.11          0.01      0.0153       1       0          0              1               0      0               0
-
-# 1 DB, null effect
-settings <- createSimulationSettings(
-  nDatabases = 1,
-  seLogRrs = poolSes(0.2, 0.4),
-  trueSubgroupLogRrsMean = 0,
-  trueSubgroupLogRrsSd = 0
-)
-results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
-results <- bind_rows(results)
-computePerformance(results)
-# method                  precision coverage type1 type2 reproEstimateInCi reproDisagreeCi  sign signReproSign precisionPi coveragePi type1Pi type2Pi reproEstimateInPi reproDisagreePi signPi signPiReproSign
-# 1 Bayesian random effects     0.229     1     0        0              0.99            0     0             0          0.111       1       0          0               1              0      0               0
-# 2 Fixed effects               1.95      0.77  0.23     0              0.6             0.28  0.23          0.02       1.95        0.77    0.23       0               0.6            0.28   0.23            0.02
-# 3 Random effects              1.95      0.77  0.23     0              0.6             0.28  0.23          0.02      NA          NA      NA          0              NA            NaN    NaN               0
-
-
-# 10 DBs, null effect
+# Check if tau posterios resembles empirical one
 settings <- createSimulationSettings(
   nDatabases = 10,
-   trueSubgroupLogRrsMean = 0,
+  trueSubgroupLogRrsMean = 0,
   trueSubgroupLogRrsSd = 0
 )
 results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
 results <- bind_rows(results)
 plotTauPosterior(results)
-computePerformance(results)
-# method                  precision coverage type1 type2 reproEstimateInCi reproDisagreeCi  sign signReproSign precisionPi coveragePi type1Pi type2Pi reproEstimateInPi reproDisagreePi signPi signPiReproSign
-# 1 Bayesian random effects      10.4     0.64  0.36     0              0.52            0.33  0.36          0.19        1.10       0.92    0.08       0              0.85            0.1    0.08            0.04
-# 2 Fixed effects               867.      0.05  0.95     0              0.11            0.44  0.95          0.51      867.         0.05    0.95       0              0.11            0.44   0.95            0.51
-# 3 Random effects               17.0     0.51  0.49     0              0.47            0.37  0.49          0.27        1.67       0.88    0.12       0              0.8             0.12   0.12            0.06
-
-
-
-ggplot(results, aes(x = tau)) +
-  geom_density()
 
 ParallelLogger::stopCluster(cluster)
 
