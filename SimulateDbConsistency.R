@@ -27,7 +27,7 @@ createSimulationSettings <- function(
     trueSubgroupLogRrsMean = 1,
     trueSubgroupLogRrsSd = 1,
     nDatabases = 2,
-    seLogRrs = runif(nDatabases, 0.05, 0.25),
+    seLogRrs = runif(nDatabases, 0.1, 0.3),
     nCaptureProcessChars = 4,
     bias0 = 0.1,
     biasCpcSd = 0.5,
@@ -212,16 +212,16 @@ for (nDatabases in c(1, 2, 4, 10)) {
                       trueEffect,
                       if (publicationBias) "" else " no"))
       if (nDatabases == 1) {
-        seLogRrs <- poolSes(0.1, 0.2)
+        seLogRrs <- poolSes(0.2, 0.2)
       } else if (nDatabases == 2) {
-        seLogRrs <- c(0.1, 0.2)
+        seLogRrs <- c(0.2, 0.2)
       } else {
         seLogRrs <- runif(nDatabases, 0.05, 0.25)
       }
       settings <- createSimulationSettings(
         nDatabases = nDatabases,
         seLogRrs = seLogRrs,
-        trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(3),
+        trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(2),
         trueSubgroupLogRrsSd = if (trueEffect == "random") 0.5 else 0,
         doOvers = if (publicationBias) 10 else 1
       )
@@ -250,9 +250,67 @@ settings <- createSimulationSettings(
 results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
 results <- bind_rows(results)
 plotTauPosterior(results)
-
+ggsave("TauPosterior_Simulations.png", width = 5, height = 4)
 ParallelLogger::stopCluster(cluster)
 
+
+settings <- createSimulationSettings(
+  nDatabases = 2,
+  seLogRrs = c(0.2, 0.2),
+  trueSubgroupLogRrsMean = log(2),
+  trueSubgroupLogRrsSd = 0
+)
+results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
+results <- bind_rows(results)
+computePerformance(results)
+
+# Analyse simulation results -----------------------------------------------------------------------
+allRows <- readr::read_csv("SimulationResults.csv")
+
+vizData <- bind_rows(
+  allRows |>
+    select(method, coverage) |>
+    mutate(interval = "Confidence interval"),
+  allRows |>
+    select(method, coverage = coveragePi) |>
+    mutate(interval = "Prediction interval")
+)
+ggplot(vizData, aes(y = coverage)) +
+  geom_hline(yintercept = 0.95, linetype = "dashed") +
+  geom_violin(aes(x = 1), scale = "width", fill = "#3f845a", alpha = 0.75) +
+  scale_y_continuous("Coverage of the 95% interval", limits = c(0, 1)) +
+  facet_grid(interval ~ method) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank()
+  )
+ggsave("SimCoverage.png", width = 5.5, height = 4)
+
+vizData <- bind_rows(
+  allRows |>
+    transmute(method, fraction = signReproSign / sign, trueEffect) |>
+    mutate(interval = "Confidence interval"),
+  allRows |>
+    transmute(method, fraction = signPiReproSign / signPi, trueEffect) |>
+    mutate(interval = "Prediction interval")
+)
+ggplot(vizData, aes(y = fraction, x = trueEffect, color = trueEffect, fill = trueEffect)) +
+  geom_violin(scale = "width", alpha = 0.75) +
+  scale_y_continuous("Fraction of significant results that replicate", limits = c(0, 1)) +
+  guides(fill=guide_legend(title="True effect"), color=guide_legend(title="True effect")) +
+  facet_grid(interval ~ method) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    legend.position = "top"
+  )
+ggsave("SimReplication.png", width = 5.5, height = 4)
 
 # Some specific examples ---------------------------------------------------------------------------
 library(dplyr)
