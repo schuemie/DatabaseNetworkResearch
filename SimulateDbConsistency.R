@@ -225,7 +225,7 @@ for (nDatabases in c(1, 2, 4, 10)) {
         trueSubgroupLogRrsSd = if (trueEffect == "random") 0.5 else 0,
         doOvers = if (publicationBias) 10 else 1
       )
-      results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
+      results <- ParallelLogger::clusterApply(cluster, 1:1000, simulateOne, settings = settings)
       results <- bind_rows(results)
       metrics <- computePerformance(results)
       rows <- tibble(
