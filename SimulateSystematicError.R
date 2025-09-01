@@ -5,10 +5,17 @@
 library(dplyr)
 library(ggplot2)
 
+# Need to have these packages installed:
+# install.packages("mvtnorm")
+# install.packages("EmpiricalCalibration")
+# install.packages("EvidenceSynthesis")
+# install.packages("ParallelLogger")
+
 # Simulation settings ------------------------------------------------------------------------------
 createSimulationSettings <- function(
     nDatabases = 5,
     nNegativeControls = 50,
+    nOutcomesOfInterest = 10,
     trueLogRr = log(2),
     trueTau = 0.25,
     nBiasSources = 10,
@@ -28,7 +35,7 @@ createSimulationSettings <- function(
 }
 
 # Various functions --------------------------------------------------------------------------------
-plotSystematicErrorDistributions <- function(logRrs, seLogRrs) {
+plotSystematicErrorDistributions <- function(logRrs, seLogRrs, settings) {
   x <- seq(log(0.1), log(10), length.out = 100)
   compute <- function(x, mcmc) {
     yMcmc <- dnorm(rep(x, nrow(mcmc$chain)), mean = mcmc$chain[, 1], sd = 1/sqrt(mcmc$chain[, 2]))
@@ -104,12 +111,12 @@ applyCurrentApproach <- function(logRrs, seLogRrs, settings) {
     logRr = estimates$logRr[seq_len(settings$nNegativeControls)],
     seLogRr = estimates$seLogRr[seq_len(settings$nNegativeControls)]
   )
-  estimateHoi <- EmpiricalCalibration::calibrateConfidenceInterval(
-    logRr = tail(estimates$logRr, 1),
-    seLogRr = tail(estimates$seLogRr, 1),
+  estimatesHois <- EmpiricalCalibration::calibrateConfidenceInterval(
+    logRr = tail(estimates$logRr, settings$nOutcomesOfInterest),
+    seLogRr = tail(estimates$seLogRr, settings$nOutcomesOfInterest),
     model = EmpiricalCalibration::convertNullToErrorModel(null)
   )
-  return(estimateHoi)
+  return(estimatesHois)
 }
 
 applyGeneralizedModel <- function(logRrs, seLogRrs, settings) {
@@ -248,13 +255,18 @@ applyGeneralizedModel <- function(logRrs, seLogRrs, settings) {
       ))
     }
   }
-  newData <- tibble(
-    logRr = logRrs[settings$nNegativeControls + 1, ],
-    seLogRr = seLogRrs[settings$nNegativeControls + 1, ],
-    databaseId = seq_len(settings$nDatabases)
-  )
-  estimate <- calibrateCiRandomEffects(model, newData)
-  return(estimate)
+  estimates <- list()
+  for (i in seq_len(settings$nOutcomesOfInterest)) {
+    newData <- tibble(
+      logRr = logRrs[settings$nNegativeControls + i, ],
+      seLogRr = seLogRrs[settings$nNegativeControls + i, ],
+      databaseId = seq_len(settings$nDatabases)
+    )
+    estimates[[i]] <- calibrateCiRandomEffects(model, newData)
+
+  }
+  estimates <- bind_rows(estimates)
+  return(estimates)
 }
 
 # Simulation function ------------------------------------------------------------------------------
@@ -266,7 +278,7 @@ simulateOne <- function(seed, settings) {
   # Draw the database size multiplier, reflecting some databases are bigger than others:
   dbSizeMultipliers <- runif(settings$nDatabases, settings$minDatabaseSizeMultiplier, settings$maxDatabaseSizeMultiplier)
   # Draw the base standard error for each outcome, reflecting some outcomes are more prevalent than others:
-  outcomeSes <- runif(settings$nNegativeControls + 1, settings$minSe, settings$maxSe)
+  outcomeSes <- runif(settings$nNegativeControls + settings$nOutcomesOfInterest, settings$minSe, settings$maxSe)
   # Multiply the two to get the SE per outcome in each database:
   seLogRrs <- outer(outcomeSes, dbSizeMultipliers)
 
@@ -278,41 +290,54 @@ simulateOne <- function(seed, settings) {
   # Compute the mean bias caused by each source:
   biasSourceMean <- rnorm(settings$nBiasSources, 0, settings$biasSourceSd)
   # Compute the bias caused by each source for each outcome:
-  biasSourceOutcome <- matrix(rnorm(settings$nBiasSources * (settings$nNegativeControls + 1), biasSourceMean, settings$biasSourceSd),
+  biasSourceOutcome <- matrix(rnorm(settings$nBiasSources * (settings$nNegativeControls + settings$nOutcomesOfInterest), biasSourceMean, settings$biasSourceSd),
                               nrow = settings$nBiasSources,
-                              ncol = settings$nNegativeControls + 1)
+                              ncol = settings$nNegativeControls + settings$nOutcomesOfInterest)
   # Multiply the two to see how much bias we have for each outcome in each database:
   biasOutcomeDb <- t(biasSourceOutcome) %*% biasSourcesPerDb
 
   # Compute observed effect sizes
-  # Draw the true effect for the outcome of interest in each database:
-  trueLogRrPerDb <- rnorm(settings$nDatabases, settings$trueLogRr, settings$trueTau)
+  # Set true effect to 0 for negative controls and draw the true effect for the outcome of interest in each database:
+  trueLogRrsPerDb <- rbind(
+    matrix(rep(0, settings$nNegativeControls * settings$nDatabases),
+           nrow = settings$nNegativeControls,
+           ncol = settings$nDatabases),
+    matrix(rnorm(settings$nDatabases * settings$nOutcomesOfInterest, settings$trueLogRr, settings$trueTau),
+           nrow = settings$nOutcomesOfInterest,
+           ncol = settings$nDatabases)
+  )
   # Draw the observed effect for each outcome. Only for the outcome of interest do we add the true effect
   # to the bias:
-  logRrs <- matrix(rnorm((settings$nNegativeControls + 1) * settings$nDatabases, biasOutcomeDb + c(rep(0, settings$nNegativeControls), 1) %*% t(trueLogRrPerDb), seLogRrs),
-                   nrow = settings$nNegativeControls + 1,
+  logRrs <- matrix(rnorm((settings$nNegativeControls + settings$nOutcomesOfInterest) * settings$nDatabases,
+                         biasOutcomeDb + trueLogRrsPerDb,
+                         seLogRrs),
+                   nrow = settings$nNegativeControls + settings$nOutcomesOfInterest,
                    ncol = settings$nDatabases)
 
   # Confirmation: Fit systematic error models per database and compare to observed to see if our
   # simulation looks like the real thing:
-  # plotSystematicErrorDistributions(logRrs, seLogRrs)
+  # plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
 
-  # Use current approach: meta-analysis per outcome:
-  # estimateCurrent <- applyCurrentApproach(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  # Use current approach: Bayesian meta-analysis per outcome, then calibrate:
+  estimatesCurrent <- applyCurrentApproach(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
 
-
-  estimateGenmodel <- applyGeneralizedModel(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  # Use Martijn's frequentist generalized model:
+  estimatesGenModel <- applyGeneralizedModel(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
 
   results <- bind_rows(
-    estimateCurrent |>
+    estimatesCurrent |>
       mutate(tau = NA) |>
       select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
       mutate(method = "Current",
+             seed = !!seed,
+             outcomeId = seq_len(settings$nOutcomesOfInterest),
              coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr),
-    estimateGenmodel |>
+    estimatesGenModel |>
       mutate(tau = sqrt(tau2)) |>
       select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
       mutate(method = "Generalized model",
+             seed = !!seed,
+             outcomeId = seq_len(settings$nOutcomesOfInterest),
              coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
   )
   return(results)
