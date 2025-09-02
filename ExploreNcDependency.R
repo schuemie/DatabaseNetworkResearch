@@ -61,6 +61,61 @@ ncEstimates <- ncEstimates |>
 saveRDS(ncEstimates, "ncEstimates.rds")
 disconnect(connection)
 
+# Fetch negative control estimates from Semanaion --------------------------------------------------
+connectionDetails <- createConnectionDetails(
+  dbms = "postgresql",
+  server = paste(keyring::key_get("ohdsiPostgresServer"),
+                 keyring::key_get("ohdsiPostgresShinyDatabase"), sep = "/"),
+  user = keyring::key_get("ohdsiPostgresUser"),
+  password = keyring::key_get("ohdsiPostgresPassword")
+)
+
+schema <- "semanaion"
+
+# executeSql(connection, "COMMIT;")
+connection <- connect(connectionDetails)
+negativeControlIds <- renderTranslateQuerySql(
+  connection = connection,
+  sql = "SELECT DISTINCT outcome_id FROM @schema.cm_target_comparator_outcome WHERE true_effect_size = 1;",
+  schema = schema,
+  snakeCaseToCamelCase = TRUE
+)[, 1]
+sql <- "
+SELECT cdm_source_abbreviation AS database_id,
+    target_id,
+    target.cohort_name AS target_name,
+    comparator_id,
+    comparator.cohort_name AS comparator_name,
+    outcome_id,
+    log_rr,
+    se_log_rr
+FROM @schema.cm_result
+INNER JOIN @schema.cg_cohort_definition target
+  ON target_id = target.cohort_definition_id
+INNER JOIN @schema.cg_cohort_definition comparator
+  ON comparator_id = comparator.cohort_definition_id
+INNER JOIN @schema.database_meta_data
+  ON cm_result.database_id = database_meta_data.database_id
+WHERE outcome_id IN (@negative_control_ids)
+    AND se_log_rr IS NOT NULL;
+"
+ncEstimates <- renderTranslateQuerySql(connection = connection,
+                                       sql = sql,
+                                       schema = schema,
+                                       negative_control_ids = negativeControlIds,
+                                       snakeCaseToCamelCase = TRUE)
+ncEstimates <- ncEstimates |>
+  mutate(databaseId = as.factor(databaseId),
+         targetName = as.factor(gsub("and ", "with ", gsub("New user of |with prior T2DM |treatment ", "", targetName))),
+         comparatorName = as.factor(gsub("and ", "with ", gsub("New user of |with prior T2DM |treatment ", "", comparatorName))),
+         analysisId = 1,
+         analysisName = "PS matching")
+
+saveRDS(ncEstimates, "ncEstimatesSemanaion.rds")
+disconnect(connection)
+
+
+
 # Compute bias distributions -----------------------------------------------------------------------
 ncEstimates <- readRDS("ncEstimates.rds")
 

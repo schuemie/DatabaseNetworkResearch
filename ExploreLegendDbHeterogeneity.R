@@ -197,6 +197,61 @@ legendLabel <- "Sccs"
 minDatabases <- 6
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
+
+# Fetch estimates for Semanaion --------------------------------------------------------------------
+connectionDetails <- createConnectionDetails(
+  dbms = "postgresql",
+  server = paste(keyring::key_get("ohdsiPostgresServer"),
+                 keyring::key_get("ohdsiPostgresShinyDatabase"), sep = "/"),
+  user = keyring::key_get("ohdsiPostgresUser"),
+  password = keyring::key_get("ohdsiPostgresPassword")
+)
+
+schema <- "semanaion"
+
+# executeSql(connection, "COMMIT;")
+connection <- connect(connectionDetails)
+negativeControlIds <- renderTranslateQuerySql(
+  connection = connection,
+  sql = "SELECT DISTINCT outcome_id FROM @schema.cm_target_comparator_outcome WHERE true_effect_size = 1;",
+  schema = schema,
+  snakeCaseToCamelCase = TRUE
+)[, 1]
+sql <- "
+SELECT cdm_source_abbreviation AS database_id,
+    target_id,
+    target.cohort_name AS target_name,
+    comparator_id,
+    comparator.cohort_name AS comparator_name,
+    outcome_id,
+    log_rr,
+    se_log_rr
+FROM @schema.cm_result
+INNER JOIN @schema.cg_cohort_definition target
+  ON target_id = target.cohort_definition_id
+INNER JOIN @schema.cg_cohort_definition comparator
+  ON comparator_id = comparator.cohort_definition_id
+INNER JOIN @schema.database_meta_data
+  ON cm_result.database_id = database_meta_data.database_id
+WHERE se_log_rr IS NOT NULL;
+"
+estimates <- renderTranslateQuerySql(connection = connection,
+                                       sql = sql,
+                                       schema = schema,
+                                       snakeCaseToCamelCase = TRUE)
+estimates <- estimates |>
+  mutate(databaseId = as.factor(databaseId),
+         targetName = as.factor(gsub("and ", "with ", gsub("New user of |with prior T2DM |treatment ", "", targetName))),
+         comparatorName = as.factor(gsub("and ", "with ", gsub("New user of |with prior T2DM |treatment ", "", comparatorName))),
+         negativeControl = outcomeId %in% negativeControlIds,
+         analysisId = 1,
+         analysisName = "PS matching")
+
+disconnect(connection)
+legendLabel <- "Naion"
+minDatabases <- 10
+saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
+
 # Compute tau --------------------------------------------------------------------------------------
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
@@ -366,7 +421,7 @@ print(head(dataLong))
 
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-analysisName <- unique(estimates$analysisName)[2]
+analysisName <- unique(estimates$analysisName)[1]
 analysisName
 
 atLeastNddbs <- estimates |>
@@ -420,8 +475,8 @@ results$name <- rownames(results)
 rownames(results) <- NULL
 results <- results |>
   filter(grepl("^cor", name)) |>
-  mutate(databaseId1 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z]+),databaseId([a-zA-Z]+)\\)", group = 1),
-         databaseId2 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z]+),databaseId([a-zA-Z]+)\\)", group = 2)) |>
+  mutate(databaseId1 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9]+),databaseId([a-zA-Z0-9]+)\\)", group = 1),
+         databaseId2 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9]+),databaseId([a-zA-Z0-9]+)\\)", group = 2)) |>
   select(databaseId1, databaseId2, rho = Estimate, lb = "l-95% CI", ub = "u-95% CI")
 
 fullMatrix <- bind_rows(results,
