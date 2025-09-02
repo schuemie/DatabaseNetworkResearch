@@ -17,7 +17,7 @@ createSimulationSettings <- function(
     nNegativeControls = 50,
     nOutcomesOfInterest = 10,
     trueLogRr = log(2),
-    trueTau = 0.25,
+    trueTau = 0.20,
     nBiasSources = 10,
     biasSourcePrevalences = runif(nBiasSources, 0, 1),
     biasSourceSd = 0.1,
@@ -94,17 +94,44 @@ plotSystematicErrorDistributions <- function(logRrs, seLogRrs, settings) {
           panel.spacing.y = unit(0, "lines"))
 }
 
-applyCurrentApproach <- function(logRrs, seLogRrs, settings) {
+
+computeWithinDatabaseCoverage <- function(logRrs, seLogRrs, settings, trueLogRrsPerDb) {
+  coverage <- c()
+  for (i in seq_len(settings$nDatabases)) {
+    null <- EmpiricalCalibration::fitMcmcNull(
+      logRr = logRrs[seq_len(settings$nNegativeControls), i],
+      seLogRr = seLogRrs[seq_len(settings$nNegativeControls), i]
+    )
+    estimatesHois <- EmpiricalCalibration::calibrateConfidenceInterval(
+      logRr = tail(logRrs[, i], settings$nOutcomesOfInterest),
+      seLogRr = tail(seLogRrs[, i], settings$nOutcomesOfInterest),
+      model = EmpiricalCalibration::convertNullToErrorModel(null)
+    )
+    trueLogRrs <- tail(trueLogRrsPerDb[, i], settings$nOutcomesOfInterest)
+    coverage <- c(coverage, estimatesHois$logLb95Rr < trueLogRrs & estimatesHois$logUb95Rr > trueLogRrs)
+  }
+  return(mean(coverage))
+}
+
+applyCurrentApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
   estimates <- list()
-  taus <- c()
   for (i in seq_len(nrow(logRrs))) {
     data <- tibble(logRr = logRrs[i, ], seLogRr = seLogRrs[i, ])
-    estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE)
-    estimates[[i]] <- tibble(logRr = estimate$mu,
-                             seLogRr = estimate$muSe,
-                             logLb = estimate$mu95Lb,
-                             logUb = estimate$mu95Ub)
-    taus[[i]] <- estimate$tau
+    if (bayesian) {
+      estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE)
+      estimates[[i]] <- tibble(logRr = estimate$mu,
+                               seLogRr = estimate$muSe,
+                               logLb = estimate$mu95Lb,
+                               logUb = estimate$mu95Ub)
+    } else {
+      meta <- meta::metagen(data$logRr, data$seLogRr, sm = "RR", control = list(maxiter=1000, stepadj=0.5))
+      s <- summary(meta)
+      rnd <- s$random
+      estimates[[i]] <- tibble(logRr = rnd$TE,
+                               seLogRr = rnd$seTE,
+                               logLb = rnd$lower,
+                               logUb = rnd$upper)
+    }
   }
   estimates <- bind_rows(estimates)
   null <- EmpiricalCalibration::fitMcmcNull(
@@ -116,6 +143,48 @@ applyCurrentApproach <- function(logRrs, seLogRrs, settings) {
     seLogRr = tail(estimates$seLogRr, settings$nOutcomesOfInterest),
     model = EmpiricalCalibration::convertNullToErrorModel(null)
   )
+  return(estimatesHois)
+}
+
+applyNaiveApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
+  calibratedEstimates <- list()
+  for (i in seq_len(settings$nDatabases)) {
+    null <- EmpiricalCalibration::fitMcmcNull(
+      logRr = logRrs[seq_len(settings$nNegativeControls), i],
+      seLogRr = seLogRrs[seq_len(settings$nNegativeControls), i]
+    )
+    calibratedEstimates[[i]] <- EmpiricalCalibration::calibrateConfidenceInterval(
+      logRr = tail(logRrs[, i], settings$nOutcomesOfInterest),
+      seLogRr = tail(seLogRrs[, i], settings$nOutcomesOfInterest),
+      model = EmpiricalCalibration::convertNullToErrorModel(null)
+    ) |>
+      mutate(outcomeId = seq_len(settings$nOutcomesOfInterest))
+  }
+  calibratedEstimates <- bind_rows(calibratedEstimates)
+  groups <- calibratedEstimates |>
+    group_by(outcomeId) |>
+    group_split()
+  estimatesHois <- list()
+  for (group in groups) {
+    if (bayesian) {
+      estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
+      estimatesHois[[group$outcomeId[1]]] <- tibble(logRr = estimate$mu,
+                                                    seLogRr = estimate$muSe,
+                                                    logLb95Rr = estimate$mu95Lb,
+                                                    logUb95Rr = estimate$mu95Ub,
+                                                    tau = estimate$tau)
+    } else {
+      meta <- meta::metagen(group$logRr, group$seLogRr, sm = "RR", control = list(maxiter=1000, stepadj=0.5))
+      s <- summary(meta)
+      rnd <- s$random
+      estimatesHois[[group$outcomeId[1]]] <- tibble(logRr = rnd$TE,
+                                                    seLogRr = rnd$seTE,
+                                                    logLb95Rr = rnd$lower,
+                                                    logUb95Rr = rnd$upper,
+                                                    tau = s$tau)
+    }
+  }
+  estimatesHois <- bind_rows(estimatesHois)
   return(estimatesHois)
 }
 
@@ -314,39 +383,83 @@ simulateOne <- function(seed, settings) {
                    nrow = settings$nNegativeControls + settings$nOutcomesOfInterest,
                    ncol = settings$nDatabases)
 
+
+  results <- tibble()
+  na <- as.numeric(NA)
+
   # Confirmation: Fit systematic error models per database and compare to observed to see if our
-  # simulation looks like the real thing:
+  # simulation looks like the real thing. (Doesn't make sense when multi-threading)
   # plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+
+  # Confirmation: Compute within database coverage to confirm our calibration procedure holds under these conditions:
+  coverageWithinDbs <- computeWithinDatabaseCoverage(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings, trueLogRrsPerDb = trueLogRrsPerDb)
+  results <- results |>
+    bind_rows(
+      tibble(logRr = na, logLb95Rr = na, logUb95Rr = na, seLogRr = na, tau = na) |>
+        mutate(method = "Within database",
+               seed = !!seed,
+               outcomeId = na,
+               coverage = coverageWithinDbs)
+    )
 
   # Use current approach: Bayesian meta-analysis per outcome, then calibrate:
   estimatesCurrent <- applyCurrentApproach(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  results <- results |>
+    bind_rows(
+      estimatesCurrent |>
+        mutate(tau = na) |>
+        select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
+        mutate(method = "Current",
+               seed = !!seed,
+               outcomeId = seq_len(settings$nOutcomesOfInterest),
+               coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
+    )
+
+  # Use current approach but non-Bayesian:
+  estimatesNonBayesian <- applyCurrentApproach(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings, bayesian = FALSE)
+  results <- results |>
+    bind_rows(
+      estimatesNonBayesian |>
+        mutate(tau = na) |>
+        select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
+        mutate(method = "Current (non-Bayesian)",
+               seed = !!seed,
+               outcomeId = seq_len(settings$nOutcomesOfInterest),
+               coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
+    )
+
+  # Use naive approach: first calibrate per-database estimates, then meta-analyse calibrated estimates
+  estimatesNaive <- applyNaiveApproach(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  results <- results |>
+    bind_rows(
+      estimatesNaive |>
+        select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
+        mutate(method = "Naive",
+               seed = !!seed,
+               outcomeId = seq_len(settings$nOutcomesOfInterest),
+               coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
+    )
 
   # Use Martijn's frequentist generalized model:
   estimatesGenModel <- applyGeneralizedModel(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  results <- results |>
+    bind_rows(
+      estimatesGenModel |>
+        mutate(tau = sqrt(tau2)) |>
+        select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
+        mutate(method = "Generalized model",
+               seed = !!seed,
+               outcomeId = seq_len(settings$nOutcomesOfInterest),
+               coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
+    )
 
-  results <- bind_rows(
-    estimatesCurrent |>
-      mutate(tau = NA) |>
-      select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
-      mutate(method = "Current",
-             seed = !!seed,
-             outcomeId = seq_len(settings$nOutcomesOfInterest),
-             coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr),
-    estimatesGenModel |>
-      mutate(tau = sqrt(tau2)) |>
-      select(logRr, logLb95Rr, logUb95Rr, seLogRr, tau) |>
-      mutate(method = "Generalized model",
-             seed = !!seed,
-             outcomeId = seq_len(settings$nOutcomesOfInterest),
-             coverage = logLb95Rr < settings$trueLogRr & logUb95Rr > settings$trueLogRr)
-  )
   return(results)
 }
 
 # Run simulation -----------------------------------------------------------------------------------
 cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
-snow::clusterExport(cluster, c("applyCurrentApproach", "applyGeneralizedModel"))
+snow::clusterExport(cluster, c("computeWithinDatabaseCoverage", "applyCurrentApproach", "applyNaiveApproach", "applyGeneralizedModel"))
 
 settings <- createSimulationSettings()
 results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
@@ -355,3 +468,7 @@ results |>
   group_by(method) |>
   summarise(coverage = mean(coverage),
             precision = exp(mean(log(1/seLogRr ^ 2))))
+
+mean(unlist(results))
+
+ParallelLogger::stopCluster(cluster)
