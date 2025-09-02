@@ -430,7 +430,7 @@ simulateOne <- function(seed, settings) {
 
   # Confirmation: Fit systematic error models per database and compare to observed to see if our
   # simulation looks like the real thing. (Doesn't make sense when multi-threading)
-  plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  # plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
 
   # Confirmation: Compute within database coverage to confirm our calibration procedure holds under these conditions:
   coverageWithinDbs <- computeWithinDatabaseCoverage(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings, trueLogRrsPerDb = trueLogRrsPerDb)
@@ -502,12 +502,52 @@ cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
 snow::clusterExport(cluster, c("computeWithinDatabaseCoverage", "applyCurrentApproach", "applyNaiveApproach", "applyGeneralizedModel"))
 
-settings <- createSimulationSettings()
+settings <- createSimulationSettings(nDatabases = 5)
 results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
 results <- bind_rows(results)
 results |>
   group_by(method) |>
   summarise(coverage = mean(coverage),
             precision = exp(mean(log(1/seLogRr ^ 2))))
+# method                 coverage precision
+# Current                   0.942      15.5
+# Current (non-Bayesian)    0.939      15.7
+# Generalized model         0.921      17.8
+# Naive                     0.915      19.4
+# Within database           0.939      NA
+
+
+settings <- createSimulationSettings(nDatabases = 10)
+results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
+results <- bind_rows(results)
+results |>
+  group_by(method) |>
+  summarise(coverage = mean(coverage),
+            precision = exp(mean(log(1/seLogRr ^ 2))))
+# method                 coverage precision
+# Current                   0.955      21.3
+# Current (non-Bayesian)    0.955      21.4
+# Generalized model         0.922      25.9
+# Naive                     0.82       45.8
+# Within database           0.944      NA
+
+
+settings <- createSimulationSettings(nDatabases = 5,
+                                     minDatabaseSizeMultiplier = 1,
+                                     maxDatabaseSizeMultiplier = 1,
+                                     minSe = 0.2,
+                                     maxSe = 0.4)
+results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
+results <- bind_rows(results)
+results |>
+  group_by(method) |>
+  summarise(coverage = mean(coverage),
+            precision = exp(mean(log(1/seLogRr ^ 2))))
+# method                 coverage precision
+# Current                   0.934      17.8
+# Current (non-Bayesian)    0.937      17.0
+# Generalized model         0.926      18.5
+# Naive                     0.91       21.1
+# Within database           0.938      NA
 
 ParallelLogger::stopCluster(cluster)
