@@ -29,9 +29,9 @@ createSimulationSettings <- function(
     trueSubgroupLogRrsSd = 1,
     nDatabases = 2,
     seLogRrs = runif(nDatabases, 0.1, 0.3),
-    nCaptureProcessChars = 4,
+    nCaptureProcessChars = 20,
     bias0 = 0.1,
-    biasCpcSd = 0.5,
+    biasCpcSd = 0.1,
     doOvers = 1
 ) {
   args <- list()
@@ -56,6 +56,7 @@ simulateOne <- function(seed, settings) {
                               settings$trueSubgroupLogRrsSd)
   trueTargetLogRr <- sum(targetMixture * trueSubgroupLogRrs)
   biasCpc <- rnorm(settings$nCaptureProcessChars, 0, settings$biasCpcSd) # Bias associated with each data capture process characteristic.
+  cpcPrevalences <- runif(settings$nCaptureProcessChars, 0, 1)
 
   minP <- 1
   nStudies <- 0
@@ -66,7 +67,8 @@ simulateOne <- function(seed, settings) {
                                ncol = settings$nSubgroups)
     databaseMixtures <- databaseMixtures / rowSums(databaseMixtures) # Subgroup mixture per database
     trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
-    databaseCpChars = matrix(rbinom(nDatabasesPlusOne * settings$nCaptureProcessChars, 1, 0.1),
+    databaseCpChars = matrix(rbinom(nDatabasesPlusOne * settings$nCaptureProcessChars, 1, cpcPrevalences),
+                             byrow = TRUE,
                              nrow = nDatabasesPlusOne,
                              ncol = settings$nCaptureProcessChars) # Data capture process characteristics per DB (binary)
     databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
@@ -223,7 +225,7 @@ for (nDatabases in c(1, 2, 4, 10)) {
         nDatabases = nDatabases,
         seLogRrs = seLogRrs,
         trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(2),
-        trueSubgroupLogRrsSd = if (trueEffect == "random") 0.5 else 0,
+        trueSubgroupLogRrsSd = if (trueEffect == "random") 1 else 0,
         doOvers = if (publicationBias) 10 else 1
       )
       results <- ParallelLogger::clusterApply(cluster, 1:1000, simulateOne, settings = settings)
@@ -242,11 +244,11 @@ for (nDatabases in c(1, 2, 4, 10)) {
 allRows <- bind_rows(allRows)
 readr::write_csv(allRows, "SimulationResults.csv")
 
-# Check if tau posterios resembles empirical one
+# Check if tau posteriors resembles empirical one
 settings <- createSimulationSettings(
-  nDatabases = 10,
+  nDatabases = 5,
   trueSubgroupLogRrsMean = 0,
-  trueSubgroupLogRrsSd = 0
+  trueSubgroupLogRrsSd = 0,
 )
 results <- ParallelLogger::clusterApply(cluster, 1:100, simulateOne, settings = settings)
 results <- bind_rows(results)
