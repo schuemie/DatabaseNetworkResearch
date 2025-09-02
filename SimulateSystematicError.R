@@ -12,6 +12,26 @@ library(ggplot2)
 # install.packages("ParallelLogger")
 
 # Simulation settings ------------------------------------------------------------------------------
+#' Create simulation settings
+#'
+#' @param nDatabases                Number of databases.
+#' @param nNegativeControls         Number of negative controls.
+#' @param nOutcomesOfInterest       Number of outcomes of interest.
+#' @param trueLogRr                 True log effect size for the outcomes of interest.
+#' @param trueTau                   True tau (heterogeneity) for the effect size of the outcomes of interest.
+#' @param nBiasSources              Number of distinct bias sources.
+#' @param minBiasSourcePrevalence   Minimum prevalences of sources of bias across databases.
+#' @param maxBiasSourcePrevalence   Maximum prevalences of sources of bias across databases.
+#' @param biasSourceSd              Standard deviation of mean bias caused by each source.
+#' @param biasOutcomeSd             Standard deviation of the bias from a source around its mean (across outcomes).
+#' @param minDatabaseSizeMultiplier Minimum multiplier for the standard error in a database.
+#' @param maxDatabaseSizeMultiplier Maximum multiplier for the standard error in a database.
+#' @param minSe                     Minimum standard error for an outcome, before applying the database multiplier.
+#' @param maxSe                     Maximum standard error for an outcome, before applying the database multiplier.
+#'
+#' @returns
+#' A settings object to be used in `simulateOne()`.
+#'
 createSimulationSettings <- function(
     nDatabases = 5,
     nNegativeControls = 50,
@@ -19,7 +39,8 @@ createSimulationSettings <- function(
     trueLogRr = log(2),
     trueTau = 0.20,
     nBiasSources = 10,
-    biasSourcePrevalences = runif(nBiasSources, 0, 1),
+    minBiasSourcePrevalence = 0,
+    maxBiasSourcePrevalence = 1,
     biasSourceSd = 0.1,
     biasOutcomeSd = 0.1,
     minDatabaseSizeMultiplier = 0.5,
@@ -36,6 +57,9 @@ createSimulationSettings <- function(
 
 # Various functions --------------------------------------------------------------------------------
 plotSystematicErrorDistributions <- function(logRrs, seLogRrs, settings) {
+  # Compute the systematic error distribution within each database and plot it. Used to check if
+  # distributions look similar to what is observed in real-world
+
   x <- seq(log(0.1), log(10), length.out = 100)
   compute <- function(x, mcmc) {
     yMcmc <- dnorm(rep(x, nrow(mcmc$chain)), mean = mcmc$chain[, 1], sd = 1/sqrt(mcmc$chain[, 2]))
@@ -96,6 +120,9 @@ plotSystematicErrorDistributions <- function(logRrs, seLogRrs, settings) {
 
 
 computeWithinDatabaseCoverage <- function(logRrs, seLogRrs, settings, trueLogRrsPerDb) {
+  # Perform calibration within each database, and compute coverage of within-database estimates.
+  # Used to verify calibration still works in this specific simulation scenario.
+
   coverage <- c()
   for (i in seq_len(settings$nDatabases)) {
     null <- EmpiricalCalibration::fitMcmcNull(
@@ -114,6 +141,9 @@ computeWithinDatabaseCoverage <- function(logRrs, seLogRrs, settings, trueLogRrs
 }
 
 applyCurrentApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
+  # Apply the current approach, where we first meta-analyse all outcomes, then use the meta-analytic
+  # estimates to fit the empirical null and calibrat.
+
   estimates <- list()
   for (i in seq_len(nrow(logRrs))) {
     data <- tibble(logRr = logRrs[i, ], seLogRr = seLogRrs[i, ])
@@ -147,6 +177,10 @@ applyCurrentApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
 }
 
 applyNaiveApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
+  # Apply the naive approach: calibrate estimates within each database, then meta-analyse calibrated
+  # estimates. This should in theory be bad because it does not take into account that systematic
+  # error is calibrated between databases.
+
   calibratedEstimates <- list()
   for (i in seq_len(settings$nDatabases)) {
     null <- EmpiricalCalibration::fitMcmcNull(
@@ -189,6 +223,8 @@ applyNaiveApproach <- function(logRrs, seLogRrs, settings, bayesian = TRUE) {
 }
 
 applyGeneralizedModel <- function(logRrs, seLogRrs, settings) {
+  # Apply Martijn's generalized calibration model. Currently only supports non-Bayesian approach.
+
   fitSystematicErrorModel <- function(data) {
     # Ensure database IDs are factors to maintain a consistent order
     databaseIds <- unique(data$databaseId)
@@ -352,8 +388,10 @@ simulateOne <- function(seed, settings) {
   seLogRrs <- outer(outcomeSes, dbSizeMultipliers)
 
   # Compute bias for each outcome
-  # First, compute which database is vulnerable to which source of bias:
-  biasSourcesPerDb <- matrix(rbinom(settings$nDatabases * settings$nBiasSources, 1, settings$biasSourcePrevalences),
+  # First, sample the prevalence of each bias source across databases:
+  biasSourcePrevalences <- runif(settings$nBiasSources, settings$minBiasSourcePrevalence, settings$maxBiasSourcePrevalence)
+  # Compute which database is vulnerable to which source of bias:
+  biasSourcesPerDb <- matrix(rbinom(settings$nDatabases * settings$nBiasSources, 1, biasSourcePrevalences),
                              nrow = settings$nBiasSources,
                              ncol = settings$nDatabases)
   # Compute the mean bias caused by each source:
@@ -364,6 +402,9 @@ simulateOne <- function(seed, settings) {
                               ncol = settings$nNegativeControls + settings$nOutcomesOfInterest)
   # Multiply the two to see how much bias we have for each outcome in each database:
   biasOutcomeDb <- t(biasSourceOutcome) %*% biasSourcesPerDb
+
+  # Is bias correlated?
+  # cor(biasOutcomeDb)
 
   # Compute observed effect sizes
   # Set true effect to 0 for negative controls and draw the true effect for the outcome of interest in each database:
@@ -389,7 +430,7 @@ simulateOne <- function(seed, settings) {
 
   # Confirmation: Fit systematic error models per database and compare to observed to see if our
   # simulation looks like the real thing. (Doesn't make sense when multi-threading)
-  # plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
+  plotSystematicErrorDistributions(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings)
 
   # Confirmation: Compute within database coverage to confirm our calibration procedure holds under these conditions:
   coverageWithinDbs <- computeWithinDatabaseCoverage(logRrs = logRrs, seLogRrs = seLogRrs, settings = settings, trueLogRrsPerDb = trueLogRrsPerDb)
@@ -468,7 +509,5 @@ results |>
   group_by(method) |>
   summarise(coverage = mean(coverage),
             precision = exp(mean(log(1/seLogRr ^ 2))))
-
-mean(unlist(results))
 
 ParallelLogger::stopCluster(cluster)
