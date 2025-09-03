@@ -354,10 +354,15 @@ ggsave(sprintf("TauDistributions_%s.png", legendLabel), width = 6, height = 5)
 tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
 
 x <- seq(from = 0, to = 2, length.out = 100)
+# priorData <- tibble(
+#   tau = c(x, x),
+#   y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
+#   `Half-normal` = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+# )
 priorData <- tibble(
-  tau = c(x, x),
-  y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
-  `Half-normal` = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+  tau = x,
+  y = dnorm(x, mean = 0, sd = 0.5) * 2,
+  `Half-normal` = rep(c("SD = 0.5"), length(x))
 )
 
 vizData <- list()
@@ -376,10 +381,20 @@ ggplot(vizData, aes(x = tau)) +
   scale_x_continuous("Tau") +
   scale_y_continuous("Density") +
   scale_linetype_manual(values = c("dashed", "dotted")) +
-  coord_cartesian(xlim = c(0,2)) +
+  coord_cartesian(xlim = c(0,1)) +
   facet_grid(analysisName ~ type)
 ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
 # ggsave(sprintf("TauPosteriorsCalibrated_%s.png", legendLabel), width = 6, height = 5)
+
+ggplot(vizData |> filter(analysisName == "PS matched", type == "Negative control"), aes(x = tau)) +
+  geom_density(fill = "#3f845a", alpha = 0.75) +
+  geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
+  scale_x_continuous("Tau") +
+  scale_y_continuous("Density") +
+  scale_linetype_manual(values = c("dashed", "dotted")) +
+  coord_cartesian(xlim = c(0,1))
+ggsave(sprintf("TauPosteriorsNcOnly_%s.svg", legendLabel), width = 6, height = 5)
+
 
 # Compute correlation matrix between databases using Bayesian model --------------------------------
 library(brms)

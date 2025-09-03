@@ -6,7 +6,7 @@ library(ggplot2)
 
 plotForest <- function(data,
                        labels = paste("Site", seq_len(nrow(data))),
-                       xLabel = "Relative risk",
+                       xLabel = "Hazard Ratio",
                        limits = c(0.1, 10),
                        alpha = 0.05) {
   d1 <- data.frame(
@@ -45,7 +45,7 @@ plotForest <- function(data,
     logLb95Ci = c(ma$fixed$lower, ma$random$lower,  estimate$mu95Lb, predictionInterval[1]),
     logUb95Ci = c(ma$fixed$upper, ma$random$upper,  estimate$mu95Ub, predictionInterval[2]),
     type = c("ma1", "ma2", "ma3", "ma4"),
-    label = c("Fixed FX", sprintf("Random FX (I^2 = %0.2f)", ma$I2), sprintf("Bayesian RFX (tau = %.2f)", estimate$tau), "Prediction interval")
+    label = c("Fixed FX", sprintf("Random FX (tau = %0.2f)", ma$tau), sprintf("Bayesian RFX (tau = %.2f)", estimate$tau), "Prediction interval")
   )
 
   d <- rbind(d1, d2, d3)

@@ -181,10 +181,15 @@ computePerformance <- function(results) {
 
 plotTauPosterior <- function(results) {
   x <- seq(from = 0, to = 2, length.out = 100)
+  # priorData <- tibble(
+  #   tau = c(x, x),
+  #   y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
+  #   `Half-normal` = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+  # )
   priorData <- tibble(
-    tau = c(x, x),
-    y = c(dnorm(x, mean = 0, sd = 0.5) * 2, dnorm(x, mean = 0, sd = 0.33) * 2),
-    `Half-normal` = rep(c("SD = 0.5", "SD = 0.33"), each = length(x))
+    tau = x,
+    y = dnorm(x, mean = 0, sd = 0.5) * 2,
+    `Half-normal` = rep(c("SD = 0.5"), length(x))
   )
   vizData <- tibble(tau = results |>
                       filter(method == "Bayesian random effects") |>
@@ -196,7 +201,7 @@ plotTauPosterior <- function(results) {
     scale_x_continuous("Tau") +
     scale_y_continuous("Density") +
     scale_linetype_manual(values = c("dashed", "dotted")) +
-    coord_cartesian(xlim = c(0,2))
+    coord_cartesian(xlim = c(0,1))
 }
 
 poolSes <- function(se1, se2) {
@@ -428,6 +433,59 @@ ggsave("SimReplicationSignificantDifferent.png", width = 5.5, height = 4)
 library(dplyr)
 source("ForestPlot.R")
 
+library(EvidenceSynthesis)
+set.seed(123)
+populations <- simulatePopulations(createSimulationSettings(n = 20000))
+labels <- paste("Site", seq_along(populations))
+fitModelInDatabase <- function(population, type) {
+  cyclopsData <- Cyclops::createCyclopsData(Surv(time, y) ~ x + strata(stratumId),
+                                            data = population,
+                                            modelType = "cox"
+  )
+  cyclopsFit <- Cyclops::fitCyclopsModel(cyclopsData)
+  approximation <- approximateLikelihood(cyclopsFit, parameter = "x", approximation = type)
+  return(approximation)
+}
+approximations <- lapply(populations, fitModelInDatabase, type = "grid with gradients")
+# approximations <- do.call("rbind", approximations)
+estimate <- computeBayesianMetaAnalysis(approximations)
+plot <- plotMetaAnalysisForest(approximations, labels, estimate, xLabel = "Hazard Ratio", showLikelihood = FALSE, fileName = "example1.svg")
+ggsave("example2.svg", plot = plot,  width = 7.5, height = 1 + 5 * 0.3)
+plotMetaAnalysisForest(approximations, labels, estimate, xLabel = "Hazard Ratio", fileName = "example3.svg")
+
+vizData <- tibble(
+  x = 1:100,
+  y = dnorm(1:100, 50, 12)
+)
+ggplot(vizData, aes(x = x, y = y)) +
+   geom_area(fill = "#C0504D", color = "#4F1D1B", size = 3) +
+  theme_void()
+ggsave("exampleNormal.svg", width = 7, height = 2)
+
+
+data <- lapply(populations, fitModelInDatabase, type = "normal")
+plot <- plotForest(bind_rows(data))
+ggsave("example4.svg", plot, width = 8, height = 4)
+
+data <- tibble(
+  logRr = c(2, 2.1, 0.15, -0.15),
+  seLogRr = c(0.04, 0.06, 0.08, 0.06)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example5.svg", plot, width = 8, height = 3)
+
+data <- tibble(
+  logRr = c(0.9),
+  seLogRr = c(0.09)
+)
+plot <- plotForest(data)
+grid::grid.draw(plot)
+ggsave("example6.svg", plot, width = 8, height = 2.5)
+
+
+
+
 data <- tibble(
   logRr = c(0.9, 1.1),
   seLogRr = c(0.09, 0.11)
@@ -485,11 +543,5 @@ plot <- plotForest(data)
 grid::grid.draw(plot)
 ggsave("example5.svg", plot, width = 8, height = 3)
 
-data <- tibble(
-  logRr = c(2, 2.1, 0.15, -0.15),
-  seLogRr = c(0.04, 0.06, 0.08, 0.06)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example6.svg", plot, width = 8, height = 3)
+
 
