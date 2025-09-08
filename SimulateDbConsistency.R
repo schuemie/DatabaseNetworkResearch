@@ -458,7 +458,7 @@ vizData <- tibble(
   y = dnorm(1:100, 50, 12)
 )
 ggplot(vizData, aes(x = x, y = y)) +
-   geom_area(fill = "#C0504D", color = "#4F1D1B", size = 3) +
+  geom_area(fill = "#C0504D", color = "#4F1D1B", size = 3) +
   theme_void()
 ggsave("exampleNormal.svg", width = 7, height = 2)
 
@@ -543,5 +543,98 @@ plot <- plotForest(data)
 grid::grid.draw(plot)
 ggsave("example5.svg", plot, width = 8, height = 3)
 
+# Find cool example ---------------------------------------------
+library(EvidenceSynthesis)
+library(dplyr)
+source("ForestPlot.R")
 
+# Make up arbitrary example with 2 databases where each rejects null, meta-analysis rejects null,
+# but prediction interval includes 1:
+data <- tibble(
+  logRr = c(0.75, 1.1),
+  seLogRr = c(0.3, 0.40)
+)
+plotForest(data)
+maTarget <- computeBayesianMetaAnalysis(data)
+piTarget <- computePredictionInterval(maTarget)
+maTarget
+piTarget
+
+
+# Constraints for corresponding example:
+# specified number of DBs
+# All non-significant
+# Same BRFX estimate
+# PI significant
+
+cost <- function(p, nDatabases, maTarget) {
+  data <- dplyr::tibble(
+    logRr = p[1:nDatabases * 2 - 1],
+    seLogRr = p[1:nDatabases * 2]
+  )
+  if (any(data$seLogRr < 0)) {
+    return(Inf)
+  }
+  # All non-significant
+  ciLb <- data$logRr + qnorm(0.025) *  data$seLogRr
+  cost <- sum(pmax(0, ciLb))
+
+  # Same BRFX estimate
+  ma <- suppressMessages(EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE))
+  cost <- cost + abs(ma$mu - maTarget$mu)
+  cost <- cost + abs(ma$muSe - maTarget$muSe)
+
+  # PI significant
+  predictionInterval <- computePredictionInterval(ma)
+  cost <- cost + pmax(0, -predictionInterval[1])
+
+  # print(paste(cost, paste(p, collapse = ",")))
+  return(cost)
+}
+
+nDatabases <- 4
+
+# Use genetic algorithm to find a solution
+cluster <- parallel::makeCluster(10)
+snow::clusterExport(cluster, "computePredictionInterval")
+snow::clusterExport(cluster, "cost")
+snow::clusterRequire(cluster, "dplyr")
+doParallel::registerDoParallel(cluster)
+
+# cluster <- ParallelLogger::makeCluster(10)
+# snow::clusterExport(cluster, "computePredictionInterval")
+# ParallelLogger::clusterRequire(cluster, "dplyr")
+
+solution <- GA::ga(
+  type = "real-valued",
+  fitness = function(x, nDatabases, maTarget) -cost(x, nDatabases, maTarget),
+  nDatabases = nDatabases,
+  maTarget = maTarget,
+  maxiter = 50,
+  lower = rep(0, nDatabases * 2),
+  upper = rep(2, nDatabases * 2),
+  parallel = cluster
+)
+data <- tibble(
+  logRr = solution$par[1:nDatabases * 2 - 1],
+  seLogRr = solution$par[1:nDatabases * 2]
+)
+
+# Simulated annealing
+# solution <- optimization::optim_sa(
+#   fun = function(x) cost(x, nDatabases, maTarget),
+#   start = rep(1, nDatabases * 2),
+#   lower = rep(0, nDatabases * 2),
+#   upper = rep(2, nDatabases * 2)
+# )
+# data <- tibble(
+#   logRr = solution$par[1:nDatabases * 2 - 1],
+#   seLogRr = solution$par[1:nDatabases * 2]
+# )
+
+
+plotForest(data)
+ma <- computeBayesianMetaAnalysis(data)
+ma
+maTarget
 

@@ -4,6 +4,37 @@
 library(EvidenceSynthesis)
 library(ggplot2)
 
+computePredictionInterval <- function(estimate) {
+  traces <- attr(estimate, "traces")
+  # Truncate extremely small tau estimates to improve stability:
+  traces[traces[, 2] < 0.01, 2] <- 0.01
+  gridMin <- min(qnorm(0.025, traces[, 1], traces[, 2]))
+  gridMax <- max(qnorm(0.975, traces[, 1], traces[, 2]))
+  grid <- seq(gridMin, gridMax, length.out = 4000)
+  predictiveDensity <- sapply(grid, function(x) mean(dnorm(x, mean = traces[, 1], sd = traces[, 2])))
+  # plot(grid, predictiveDensity)
+  findHdiFromGrid <- function(grid, density, credMass = 0.95) {
+    probMass <- density / sum(density)
+    sortedIndices <- order(probMass, decreasing = TRUE)
+    sortedProbMass <- probMass[sortedIndices]
+    cumulativeProb <- cumsum(sortedProbMass)
+    hdiPointCount <- which(cumulativeProb >= credMass)[1]
+    hdiIndices <- sortedIndices[1:hdiPointCount]
+    hdiInterval <- range(grid[hdiIndices])
+    return(hdiInterval)
+  }
+  predictionInterval <- findHdiFromGrid(grid, predictiveDensity, credMass = 0.95)
+  predictionEstimate <- weighted.mean(grid, predictiveDensity)
+  return(c(predictionInterval[1], predictionEstimate, predictionInterval[2]))
+
+  # To verify: use very large sample:
+  # predictionInterval
+  # predictions <- do.call(c, lapply(seq_len(nrow(traces)), function(i) rnorm(100000, traces[i, 1], traces[i, 2])))
+  # predictionInterval <- HDInterval::hdi(predictions, credMass = 0.95)
+  # predictionInterval
+}
+
+
 plotForest <- function(data,
                        labels = paste("Site", seq_len(nrow(data))),
                        xLabel = "Hazard Ratio",
@@ -35,15 +66,11 @@ plotForest <- function(data,
   ma <- summary(meta::metagen(data$logRr, data$seLogRr))
 
   estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data)
-  traces <- attr(estimate, "traces")
-  predictions <- rnorm(nrow(traces), traces[, 1], traces[, 2])
-  predictionEstimate <- mean(predictions)
-  predictionInterval <- HDInterval::hdi(predictions, credMass = 0.95)
-
+  predictionInterval <- computePredictionInterval(estimate)
   d3 <- data.frame(
-    logRr = c(ma$fixed$TE, ma$random$TE,  estimate$logRr, predictionEstimate),
+    logRr = c(ma$fixed$TE, ma$random$TE,  estimate$logRr, predictionInterval[2]),
     logLb95Ci = c(ma$fixed$lower, ma$random$lower,  estimate$mu95Lb, predictionInterval[1]),
-    logUb95Ci = c(ma$fixed$upper, ma$random$upper,  estimate$mu95Ub, predictionInterval[2]),
+    logUb95Ci = c(ma$fixed$upper, ma$random$upper,  estimate$mu95Ub, predictionInterval[3]),
     type = c("ma1", "ma2", "ma3", "ma4"),
     label = c("Fixed FX", sprintf("Random FX (tau = %0.2f)", ma$tau), sprintf("Bayesian RFX (tau = %.2f)", estimate$tau), "Prediction interval")
   )

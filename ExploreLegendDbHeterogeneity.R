@@ -14,7 +14,7 @@ connectionDetails <- createConnectionDetails(
   user = keyring::key_get("ohdsiPostgresUser"),
   password = keyring::key_get("ohdsiPostgresPassword")
 )
-schema <- "legendt2dm_class_results_v2"
+schema <- "legendt2dm_class_results"
 
 # executeSql(connection, "COMMIT;")
 connection <- connect(connectionDetails)
@@ -58,7 +58,7 @@ estimates <- estimates |>
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
 legendLabel <- "T2dm"
-minDatabases <- 3
+minDatabases <- 10
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 
@@ -436,7 +436,7 @@ print(head(dataLong))
 
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-analysisName <- unique(estimates$analysisName)[1]
+analysisName <- unique(estimates$analysisName)[2]
 analysisName
 
 atLeastNddbs <- estimates |>
@@ -490,8 +490,8 @@ results$name <- rownames(results)
 rownames(results) <- NULL
 results <- results |>
   filter(grepl("^cor", name)) |>
-  mutate(databaseId1 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9]+),databaseId([a-zA-Z0-9]+)\\)", group = 1),
-         databaseId2 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9]+),databaseId([a-zA-Z0-9]+)\\)", group = 2)) |>
+  mutate(databaseId1 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9_]+),databaseId([a-zA-Z0-9_]+)\\)", group = 1),
+         databaseId2 = stringr::str_extract(name, "cor\\(databaseId([a-zA-Z0-9_]+),databaseId([a-zA-Z0-9_]+)\\)", group = 2)) |>
   select(databaseId1, databaseId2, rho = Estimate, lb = "l-95% CI", ub = "u-95% CI")
 
 fullMatrix <- bind_rows(results,
@@ -509,32 +509,28 @@ fullMatrix <- fullMatrix |>
   pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "rho", names_sort = TRUE)
 readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", analysisName), legendLabel))
 
-#
-# posteriorSamples <- posterior_samples(correlationModelFit, pars = "cor_outcomeId__databaseIdDb1__databaseIdDb2")
-# colnames(posteriorSamples) <- "rho"
-# posteriorMedian <- median(posteriorSamples$rho)
-# credibleInterval <- quantile(posteriorSamples$rho, probs = c(0.025, 0.975))
-#
-# cat("\n--- Final Results ---\n")
-# cat("Posterior Median for Correlation (ρ):", round(posteriorMedian, 3), "\n")
-# cat("95% Credible Interval for Correlation (ρ): [", round(credibleInterval[1], 3), ",", round(credibleInterval[2], 3), "]\n")
-# cat("The true value used in the simulation was:", trueRho, "\n")
-#
-#
-# # Visualize the posterior distribution of the correlation parameter.
-# ggplot(posteriorSamples, aes(x = rho)) +
-#   geom_density(fill = "skyblue", alpha = 0.7) +
-#   geom_vline(xintercept = posteriorMedian, color = "blue", linetype = "dashed", size = 1) +
-#   geom_vline(xintercept = credibleInterval, color = "red", linetype = "dotted") +
-#   labs(
-#     title = "Posterior Distribution of the Correlation (ρ)",
-#     subtitle = paste0("Median: ", round(posteriorMedian, 2),
-#                       ", 95% CrI: [", round(credibleInterval[1], 2), ", ", round(credibleInterval[2], 2), "]"),
-#     x = "Correlation (ρ)",
-#     y = "Density"
-#   ) +
-#   theme_minimal()
 
+# Non-Bayesian correlation metric ------------------------------------------------------------------
+source("ComputeDatabaseCorrelation.R")
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+analysisName <- unique(estimates$analysisName)[2]
+analysisName
+
+atLeastNddbs <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  group_by(targetId, comparatorId, outcomeId) |>
+  summarise(n = n(), .groups = "drop") |>
+  filter(n >= minDatabases) |>
+  arrange(targetId, comparatorId, outcomeId) |>
+  mutate(dummyOutcomeId = row_number())
+
+dataLong <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
+  select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
+
+model <- estimateCorrelationMatrix(dataLong)
+model
 
 # Compute tau for calibrated estimates -------------------------------------------------------------
 # We shouldn't really do this as systematic error will be correlated between databases, but it can
