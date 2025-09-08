@@ -436,20 +436,38 @@ print(head(dataLong))
 
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-analysisName <- unique(estimates$analysisName)[2]
+analysisName <- unique(estimates$analysisName)[1]
 analysisName
+
+estimates |>
+  group_by(databaseId, analysisName) |>
+  summarise(
+    p05 = quantile(seLogRr, 0.05),
+    p25 = quantile(seLogRr, 0.25),
+    p50 = quantile(seLogRr, 0.55),
+    p75 = quantile(seLogRr, 0.75),
+    p95 = quantile(seLogRr, 0.95)
+  ) |>
+  arrange(p50) |>
+  print(n = 100)
+
+poweredDbs <- estimates  |>
+  group_by(databaseId, analysisName) |>
+  summarise(medianSe = median(seLogRr), .groups = "drop") |>
+  filter(medianSe < 1)
 
 atLeastNddbs <- estimates |>
   filter(analysisName == !!analysisName) |>
   group_by(targetId, comparatorId, outcomeId) |>
   summarise(n = n(), .groups = "drop") |>
-  filter(n >= minDatabases) |>
+  # filter(n >= minDatabases) |>
   arrange(targetId, comparatorId, outcomeId) |>
   mutate(dummyOutcomeId = row_number())
 
 dataLong<- estimates |>
   filter(analysisName == !!analysisName) |>
   inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
+  inner_join(poweredDbs, by = join_by(databaseId, analysisName)) |>
   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
 
 
