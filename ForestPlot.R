@@ -85,16 +85,16 @@ plotForest <- function(data,
     if (showBayesianRandomEffects) {
       predictionInterval <- computePredictionInterval(estimate)
     } else if (showRandomEffects) {
-      predictionInterval <- c(ma$predict$lower, ma$predict$TE, ma$predict$upper)
+      predictionInterval <- c(ma$predict$lower, ma$predict$upper)
     } else {
-      predictionInterval <- c(ma$lower.fixed, ma$TE.fixed, ma$upper.fixed)
+      predictionInterval <- c(ma$lower.fixed, ma$upper.fixed)
     }
     d3 <- bind_rows(
       d3,
       tibble(
-        logRr = NA, #predictionInterval[2],
+        logRr = NA,
         logLb95Ci = predictionInterval[1],
-        logUb95Ci = predictionInterval[3],
+        logUb95Ci = predictionInterval[2],
         type = "pi",
         label = "Prediction interval"
       )

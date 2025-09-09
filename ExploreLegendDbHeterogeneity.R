@@ -436,6 +436,7 @@ print(head(dataLong))
 
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
 analysisName <- unique(estimates$analysisName)[1]
 analysisName
 
@@ -454,7 +455,10 @@ estimates |>
 poweredDbs <- estimates  |>
   group_by(databaseId, analysisName) |>
   summarise(medianSe = median(seLogRr), .groups = "drop") |>
-  filter(medianSe < 1)
+  filter(medianSe < 1) |>
+  group_by(databaseId) |>
+  summarise(analysisCount = n()) |>
+  filter(analysisCount == length(unique(estimates$analysisName)))
 
 atLeastNddbs <- estimates |>
   filter(analysisName == !!analysisName) |>
@@ -467,7 +471,7 @@ atLeastNddbs <- estimates |>
 dataLong<- estimates |>
   filter(analysisName == !!analysisName) |>
   inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
-  inner_join(poweredDbs, by = join_by(databaseId, analysisName)) |>
+  inner_join(poweredDbs, by = join_by(databaseId)) |>
   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
 
 

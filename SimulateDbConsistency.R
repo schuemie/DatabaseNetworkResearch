@@ -162,7 +162,7 @@ simulateOne <- function(seed, settings) {
     logRrLb = c(feEstimate$lower, reEstimate$lower, breEstimate$mu95Lb),
     logRrUb = c(feEstimate$upper, reEstimate$upper, breEstimate$mu95Ub),
     logPiLb = c(feEstimate$lower, meta$lower.predict, predictionInterval[1]),
-    logPiUb = c(feEstimate$upper, meta$upper.predict, predictionInterval[3]),
+    logPiUb = c(feEstimate$upper, meta$upper.predict, predictionInterval[2]),
     tau = c(0, s$tau, breEstimate$tau),
     tauLb = c(0, s$lower.tau, breEstimate$tau95Lb),
     tauUb = c(0, s$upper.tau, breEstimate$tau95Ub),
