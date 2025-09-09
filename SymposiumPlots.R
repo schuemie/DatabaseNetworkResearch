@@ -32,3 +32,9 @@ plotForest(data = data,
            showRandomEffects = FALSE,
            showPredictionInterval = TRUE,
            fileName = "Symposium/ExampleSameCi4Dbs_Pi.png")
+
+plotForest(data = data,
+           showFixedEffects = TRUE,
+           showRandomEffects = TRUE,
+           showPredictionInterval = TRUE,
+           fileName = "Symposium/ExampleSameCi4Dbs_Pi_Other.png")
