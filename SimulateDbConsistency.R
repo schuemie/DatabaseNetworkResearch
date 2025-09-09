@@ -609,8 +609,8 @@ source("ForestPlot.R")
 # Make up arbitrary example with 2 databases where each rejects null, meta-analysis rejects null,
 # but prediction interval includes 1:
 data <- tibble(
-  logRr = c(0.75, 1.1),
-  seLogRr = c(0.3, 0.40)
+  logRr = c(0.75, 1.10),
+  seLogRr = c(0.30, 0.25)
 )
 plotForest(data)
 maTarget <- computeBayesianMetaAnalysis(data)
@@ -625,7 +625,7 @@ piTarget
 # Same BRFX estimate
 # PI significant
 
-cost <- function(p, nDatabases, maTarget) {
+cost <- function(p, nDatabases, maTarget, eachDbSignificant, piSignificant) {
   data <- dplyr::tibble(
     logRr = p[1:nDatabases * 2 - 1],
     seLogRr = p[1:nDatabases * 2]
@@ -633,30 +633,40 @@ cost <- function(p, nDatabases, maTarget) {
   if (any(data$seLogRr < 0)) {
     return(Inf)
   }
-  # All non-significant
-  ciLb <- data$logRr + qnorm(0.025) *  data$seLogRr
-  cost <- sum(pmax(0, ciLb))
+  # Require significant per database (or not)
+  ciLb <- data$logRr + qnorm(0.025) * data$seLogRr
+  if (eachDbSignificant) {
+    cost <- sum(pmax(0.01, -ciLb) - 0.01)
+  } else {
+    cost <- sum(pmax(-0.01, ciLb) + 0.01)
+  }
 
   # Same BRFX estimate
   ma <- suppressMessages(EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE))
   cost <- cost + abs(ma$mu - maTarget$mu)
   cost <- cost + abs(ma$muSe - maTarget$muSe)
 
-  # PI significant
+  # PI significant (or not)
   predictionInterval <- computePredictionInterval(ma)
-  cost <- cost + pmax(0, -predictionInterval[1])
+  if (piSignificant) {
+    cost <- cost + pmax(0.01, -predictionInterval[1]) - 0.01
+  } else {
+    cost <- cost + pmax(-0.01, predictionInterval[1]) + 0.01
+  }
 
-  # print(paste(cost, paste(p, collapse = ",")))
+  print(paste(cost, paste(p, collapse = ",")))
   return(cost)
 }
 
-nDatabases <- 4
+nDatabases <- 2
+eachDbSignificant <- FALSE
+piSignificant <- TRUE
 
 # Use genetic algorithm to find a solution
 cluster <- parallel::makeCluster(10)
 snow::clusterExport(cluster, "computePredictionInterval")
 snow::clusterExport(cluster, "cost")
-snow::clusterRequire(cluster, "dplyr")
+ParallelLogger::clusterRequire(cluster, "dplyr")
 doParallel::registerDoParallel(cluster)
 
 # cluster <- ParallelLogger::makeCluster(10)
@@ -665,18 +675,25 @@ doParallel::registerDoParallel(cluster)
 
 solution <- GA::ga(
   type = "real-valued",
-  fitness = function(x, nDatabases, maTarget) -cost(x, nDatabases, maTarget),
+  fitness = function(x, nDatabases, maTarget, eachDbSignificant, piSignificant) -cost(x, nDatabases, maTarget, eachDbSignificant, piSignificant),
   nDatabases = nDatabases,
   maTarget = maTarget,
+  eachDbSignificant = eachDbSignificant,
+  piSignificant = piSignificant,
   maxiter = 50,
   lower = rep(0, nDatabases * 2),
   upper = rep(2, nDatabases * 2),
   parallel = cluster
 )
+
+parallel::stopCluster(cluster)
 data <- tibble(
-  logRr = solution$par[1:nDatabases * 2 - 1],
-  seLogRr = solution$par[1:nDatabases * 2]
+  logRr = solution@solution[1:nDatabases * 2 - 1],
+  seLogRr = solution@solution[1:nDatabases * 2]
 )
+plotForest(data)
+
+
 
 # Simulated annealing
 # solution <- optimization::optim_sa(
@@ -691,8 +708,35 @@ data <- tibble(
 # )
 
 
+data <- tibble(
+  logRr =   c(0.877, 1.07, 1.05, 1.24),
+  seLogRr = c(0.526, 0.6, 0.608, 0.8)
+)
 plotForest(data)
 ma <- computeBayesianMetaAnalysis(data)
+computePredictionInterval(ma)
+
+
+
+data <- tibble(
+  logRr =   c(1.011, 1.075),
+  seLogRr = c(0.175, 0.402)
+)
+plotForest(data)
+
+# 2.74 1.44 5.44
+
+fit <- nlm(cost,
+           solution@solution,
+           nDatabases = nDatabases,
+           maTarget = maTarget,
+           eachDbSignificant = eachDbSignificant,
+           piSignificant = piSignificant)
+
+
+# Target MA: 2.50 (1.20-4.86)
+
+maTarget <- computeBayesianMetaAnalysis(data)
 ma
 maTarget
 
