@@ -2,9 +2,11 @@
 # on the accuracy of database network estimates. We assume there is a target population to which we
 # wish to generalize.
 
+source("PredictionInterval.R")
 library(dplyr)
 library(ggplot2)
 library(ggh4x)
+library(gtools)
 
 # Simulation settings ------------------------------------------------------------------------------
 #' Title
@@ -13,11 +15,47 @@ library(ggh4x)
 #' @param trueSubgroupLogRrsMean  Mean of the true log RR per subgroup.
 #' @param trueSubgroupLogRrsSd    SD of the true log RR per subgroup.
 #' @param nDatabases              Number of databases.
+#' @param subgroupMixVariety      The overall mixture of subgroups for the network. Set to 0.1 for
+#'                                skewed distributions, 1 for mixed, 10 for uniform across
+#'                                subgroups.
+#' @param subgroupConsistency     How much each database's subgroup mixture differs from the network
+#'                                centroid. Set to 1 have each database differ from centroid, 500 to
+#'                                have them all be alike.
+#' @param targetSubgroupMixVariety The mixture of subgroups in the target population. Set to 0.1 for
+#'                                 skewed distributions, 1 for mixed, 10 for uniform across
+#'                                 subgroups. Note: the target mixture is also used for the held-
+#'                                 out study.
+#' @param cpcConsistency          How much each database's capture process characteristics will
+#'                                differ. Set to 0.1 for low consistency, or 25 for high.
+#' @param targetCpcMixVariety     The mixture of capture process characteristics in the replication
+#'                                study Set to 0.5 for mixed characteristics, and 0.9 or 0.1
+#'                                for having either all or no of the characteristics.
 #' @param seLogRrs                Standard error per database (related to sample size).
 #' @param nCaptureProcessChars    Number of data capture process characteristics.
 #' @param bias0                   Baseline bias.
 #' @param biasCpcSd               SD of the bias associated with each data capture characteristic.
 #' @param doOvers                 How often the study is repeated until p < 0.05. (Publication bias)
+#'
+#' @details
+#' Subgroup mixtures are sampled in two stages:
+#'
+#' 1. Sample a centroid mixture from a Dirichlet with alpha = subgroupMixVariety. A higher alpha
+#' will mean the centroid will be a more equal mix of all subgroups.
+#' 2. Sample mixtures for each database from a Dirichlet with alpha = centroid * subgroupConsistency
+#' + epsilon. Larger values of subgroupConsistency will mean databases will be more like the
+#' centroid.
+#'
+#' Data capture characteristics are also sampled in two stages:
+#' 1. Sample the prevalence of each characteristic from a beta distribution with alpha = 1/cpcConsistency
+#' and beta = 1/cpcConsistency. Higher cpcConsistency means the prevalences will be closer to 0 and 1.
+#' 2. Sample the binary characteristics for each database from a binomial with 1 trial and probability
+#' equal to the prevalences sampled in step 1.
+#'
+#' The replication study samples the subgroup mixture from a Dirichlet with alpha = targetCpcMixVariety.
+#' Higher values means the replication study has a more even mixture of all subgroups.
+#'
+#' The replication study samples its characteristics from a binomial with 1 trial and probability
+#' equal to targetCpcMixVariety.
 #'
 #' @returns
 #' A setting object
@@ -28,8 +66,13 @@ createSimulationSettings <- function(
     trueSubgroupLogRrsMean = 1,
     trueSubgroupLogRrsSd = 1,
     nDatabases = 2,
+    subgroupMixVariety = 1,
+    subgroupConsistency = 200,
+    targetSubgroupMixVariety = 10,
     seLogRrs = runif(nDatabases, 0.1, 0.3),
     nCaptureProcessChars = 20,
+    cpcConsistency = 25,
+    targetCpcMixVariety = 0.9,
     bias0 = 0.1,
     biasCpcSd = 0.1,
     doOvers = 1
@@ -45,40 +88,49 @@ createSimulationSettings <- function(
 # settings = createSimulationSettings()
 simulateOne <- function(seed, settings) {
   set.seed(seed)
-  # Add one database to test reproducability:
-  nDatabasesPlusOne <- settings$nDatabases + 1
-  seLogRrs <- c(settings$seLogRrs, tail(settings$seLogRrs, 1))
 
-  targetMixture <- runif(settings$nSubgroups, 0, 1)
-  targetMixture <- targetMixture / sum(targetMixture) # Subgroup mixture in target population to which we wish to generalize
   trueSubgroupLogRrs <- rnorm(settings$nSubgroups,
                               settings$trueSubgroupLogRrsMean,
                               settings$trueSubgroupLogRrsSd)
-  trueTargetLogRr <- sum(targetMixture * trueSubgroupLogRrs)
   biasCpc <- rnorm(settings$nCaptureProcessChars, 0, settings$biasCpcSd) # Bias associated with each data capture process characteristic.
-  cpcPrevalences <- runif(settings$nCaptureProcessChars, 0, 1)
+
+  # Subgroup mixture in target population to which we wish to generalize. This will also be the
+  # mixture in the replication study:
+  targetMixture <- rdirichlet(1, rep(settings$targetSubgroupMixVariety, settings$nSubgroups))
+  trueTargetLogRr <- sum(targetMixture * trueSubgroupLogRrs)
+
+  # Capture process characteristics in the replication study:
+  targetCpChars <- rbinom(settings$nCaptureProcessChars, 1, settings$targetCpcMixVariety)
+  targetBias <- settings$bias0 + targetCpChars %*% biasCpc
+
+  # Estimate in the repication study:
+  targetSeLogRr <- tail(settings$seLogRrs, 1)
+  targetLogRr <- rnorm(1, trueTargetLogRr + targetBias, targetSeLogRr)
 
   minP <- 1
   nStudies <- 0
   for (i in seq_len(settings$doOvers)) {
     nStudies <- nStudies + 1
-    databaseMixtures <- matrix(runif(nDatabasesPlusOne * settings$nSubgroups),
-                               nrow = nDatabasesPlusOne,
-                               ncol = settings$nSubgroups)
-    databaseMixtures <- databaseMixtures / rowSums(databaseMixtures) # Subgroup mixture per database
-    trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
-    databaseCpChars = matrix(rbinom(nDatabasesPlusOne * settings$nCaptureProcessChars, 1, cpcPrevalences),
+
+    # Subgroup mixture per database:
+    centroid <- gtools::rdirichlet(1, rep(settings$subgroupMixVariety, settings$nSubgroups))
+    databaseMixtures <- gtools::rdirichlet(settings$nDatabases, centroid * settings$subgroupConsistency + 1e-5)
+
+    # Data capture characteristics per database (binary):
+    cpcPrevalences <- rbeta(settings$nCaptureProcessChars, shape1 = 1 / settings$cpcConsistency, shape2 = 1 / settings$cpcConsistency)
+    databaseCpChars = matrix(rbinom(settings$nDatabases * settings$nCaptureProcessChars, 1, cpcPrevalences),
                              byrow = TRUE,
-                             nrow = nDatabasesPlusOne,
-                             ncol = settings$nCaptureProcessChars) # Data capture process characteristics per DB (binary)
-    databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
+                             nrow = settings$nDatabases,
+                             ncol = settings$nCaptureProcessChars)
 
     # Observed effects:
-    databaseLogRrs <- rnorm(nDatabasesPlusOne, trueDatabaseLogRr + databaseBias, seLogRrs)
+    trueDatabaseLogRr <- databaseMixtures %*% trueSubgroupLogRrs
+    databaseBias <- settings$bias0 + databaseCpChars %*% biasCpc
+    databaseLogRrs <- rnorm(settings$nDatabases, trueDatabaseLogRr + databaseBias, settings$seLogRrs)
 
     data <- data.frame(
-      logRr = databaseLogRrs[seq_len(settings$nDatabases)],
-      seLogRr = seLogRrs[seq_len(settings$nDatabases)]
+      logRr = databaseLogRrs,
+      seLogRr = settings$seLogRrs
     )
     meta <- meta::metagen(data$logRr, data$seLogRr, sm = "RR", control = list(maxiter=1000, stepadj=0.5), prediction = TRUE)
     p <- summary(meta)$random$p
@@ -98,9 +150,7 @@ simulateOne <- function(seed, settings) {
   reEstimate <- s$random
   feEstimate <- s$fixed
   breEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, showProgressBar = FALSE)
-  traces <- attr(breEstimate, "traces")
-  predictions <- rnorm(nrow(traces), traces[, 1], traces[, 2])
-  predictionInterval <- HDInterval::hdi(predictions, credMass = 0.95)
+  predictionInterval <- computePredictionInterval(breEstimate)
   lbs <- data$logRr + qnorm(0.025) * data$seLogRr
   ubs <- data$logRr + qnorm(0.975) * data$seLogRr
   nSignificant <- sum(lbs > 0 | ubs < 0)
@@ -112,14 +162,14 @@ simulateOne <- function(seed, settings) {
     logRrLb = c(feEstimate$lower, reEstimate$lower, breEstimate$mu95Lb),
     logRrUb = c(feEstimate$upper, reEstimate$upper, breEstimate$mu95Ub),
     logPiLb = c(feEstimate$lower, meta$lower.predict, predictionInterval[1]),
-    logPiUb = c(feEstimate$upper, meta$upper.predict, predictionInterval[2]),
+    logPiUb = c(feEstimate$upper, meta$upper.predict, predictionInterval[3]),
     tau = c(0, s$tau, breEstimate$tau),
     tauLb = c(0, s$lower.tau, breEstimate$tau95Lb),
     tauUb = c(0, s$upper.tau, breEstimate$tau95Ub),
-    tauSample = c(list(0), list(0), list(sample(traces[, 2], 1000))),
+    tauSample = c(list(0), list(0), list(sample(attr(breEstimate, "traces")[, 2], 1000))),
     replicationLogRr = tail(databaseLogRrs, 1),
-    replicationLogLb = replicationLogRr + qnorm(0.025) * tail(seLogRrs, 1),
-    replicationLogUb = replicationLogRr + qnorm(0.975) * tail(seLogRrs, 1),
+    replicationLogLb = replicationLogRr + qnorm(0.025) * targetSeLogRr,
+    replicationLogUb = replicationLogRr + qnorm(0.975) * targetSeLogRr,
     nSignificant = nSignificant,
     nDatabases = settings$nDatabases,
     nStudies = nStudies
@@ -210,39 +260,47 @@ poolSes <- function(se1, se2) {
 
 cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
+ParallelLogger::clusterRequire(cluster, "gtools")
+snow::clusterExport(cluster, "computePredictionInterval")
 
 allRows <- list()
 for (nDatabases in c(1, 2, 4, 10)) {
   for (trueEffect in c("null", "fixed", "random")) {
     for (publicationBias in c(FALSE, TRUE)) {
-      message(sprintf("Simulating %d databases, true effect is %s, with%s publication bias",
-                      nDatabases,
-                      trueEffect,
-                      if (publicationBias) "" else " no"))
-      if (nDatabases == 1) {
-        seLogRrs <- poolSes(0.2, 0.2)
-      } else if (nDatabases == 2) {
-        seLogRrs <- c(0.2, 0.2)
-      } else {
-        seLogRrs <- runif(nDatabases, 0.05, 0.25)
+      for (databaseHeterogeneity in c("high", "low")) {
+        message(sprintf("Simulating %d databases, true effect is %s, with%s publication bias",
+                        nDatabases,
+                        trueEffect,
+                        if (publicationBias) "" else " no"))
+        if (nDatabases == 1) {
+          seLogRrs <- poolSes(0.2, 0.2)
+        } else if (nDatabases == 2) {
+          seLogRrs <- c(0.2, 0.2)
+        } else {
+          seLogRrs <- runif(nDatabases, 0.05, 0.25)
+        }
+        settings <- createSimulationSettings(
+          nDatabases = nDatabases,
+          seLogRrs = seLogRrs,
+          trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(2),
+          trueSubgroupLogRrsSd = if (trueEffect == "random") 1 else 0,
+          subgroupMixVariety = if (databaseHeterogeneity == "high") 10 else 1,
+          subgroupConsistency = if (databaseHeterogeneity == "high") 2 else 200,
+          cpcConsistency = if (databaseHeterogeneity == "high") 0.1 else 25,
+          doOvers = if (publicationBias) 10 else 1
+        )
+        results <- ParallelLogger::clusterApply(cluster, 1:1000, simulateOne, settings = settings)
+        results <- bind_rows(results)
+        metrics <- computePerformance(results)
+        rows <- tibble(
+          nDatabases = !!nDatabases,
+          trueEffect = !!trueEffect,
+          publicationBias = !!publicationBias,
+          databaseHeterogeneity = !!databaseHeterogeneity
+        ) |>
+          bind_cols(metrics)
+        allRows[[length(allRows) + 1]] <- rows
       }
-      settings <- createSimulationSettings(
-        nDatabases = nDatabases,
-        seLogRrs = seLogRrs,
-        trueSubgroupLogRrsMean = if (trueEffect == "null") 0 else log(2),
-        trueSubgroupLogRrsSd = if (trueEffect == "random") 1 else 0,
-        doOvers = if (publicationBias) 10 else 1
-      )
-      results <- ParallelLogger::clusterApply(cluster, 1:1000, simulateOne, settings = settings)
-      results <- bind_rows(results)
-      metrics <- computePerformance(results)
-      rows <- tibble(
-        nDatabases = !!nDatabases,
-        trueEffect = !!trueEffect,
-        publicationBias = !!publicationBias
-      ) |>
-        bind_cols(metrics)
-      allRows[[length(allRows) + 1]] <- rows
     }
   }
 }
