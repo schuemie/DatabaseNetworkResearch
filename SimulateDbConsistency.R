@@ -96,7 +96,7 @@ simulateOne <- function(seed, settings) {
 
   # Subgroup mixture in target population to which we wish to generalize. This will also be the
   # mixture in the replication study:
-  targetMixture <- rdirichlet(1, rep(settings$targetSubgroupMixVariety, settings$nSubgroups))
+  targetMixture <- gtools::rdirichlet(1, rep(settings$targetSubgroupMixVariety, settings$nSubgroups))
   trueTargetLogRr <- sum(targetMixture * trueSubgroupLogRrs)
 
   # Capture process characteristics in the replication study:
@@ -260,7 +260,6 @@ poolSes <- function(se1, se2) {
 
 cluster <- ParallelLogger::makeCluster(10)
 ParallelLogger::clusterRequire(cluster, "dplyr")
-ParallelLogger::clusterRequire(cluster, "gtools")
 snow::clusterExport(cluster, "computePredictionInterval")
 
 allRows <- list()
