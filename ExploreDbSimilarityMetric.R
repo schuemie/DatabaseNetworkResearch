@@ -24,11 +24,26 @@ profilesTable <- "db_profile_results"
 vocabularyDatabaseSchema <- "vocabulary_20240229"
 
 # Fetch data -------------------------------------------------------------------
-conditionRecordCountAnalysisId <- 401
-ingredientRecordCountAnalysisId <- 901
+# Needed for normalization of counts
 numberOfPersonsAnalysisId <- 1
-lengthOfOpAnalysisId <- 108
 numberOfOpAnalysisId <- 113
+
+# Demographics
+genderAnalysisId <- 2
+ageAnalysisId  <- 101
+
+# Observation periods
+lengthOfOpAnalysisId <- 108
+
+# Visits
+visitAnalysisId <- 200
+
+# Conditions
+conditionRecordCountAnalysisId <- 401
+
+# Drugs
+ingredientRecordCountAnalysisId <- 901
+
 
 connection <- connect(connectionDetails)
 sql <- "
@@ -49,6 +64,27 @@ normalizationData <- renderTranslateQuerySql(
                    numberOfOpAnalysisId),
   snakeCaseToCamelCase = TRUE
 )
+
+sql <- "
+SELECT cdm_source_name,
+  analysis_id,
+  CAST(stratum_1 AS INT) AS stratum_id,
+  count_value
+FROM @profiles_database_schema.@profiles_table
+WHERE analysis_id IN (@analysis_ids);
+"
+otherFeatures <- renderTranslateQuerySql(
+  connection = connection,
+  sql = sql,
+  profiles_database_schema = profilesDatabaseSchema,
+  profiles_table = profilesTable,
+  analysis_ids = c(genderAnalysisId,
+                   ageAnalysisId,
+                   visitAnalysisId),
+  snakeCaseToCamelCase = TRUE
+)
+
+
 sql <- "
 SELECT cdm_source_name,
   ancestor_concept_id AS concept_id,
@@ -126,6 +162,7 @@ disconnect(connection)
 
 profileData <- list(
   normalizationData = normalizationData,
+  otherFeatures = otherFeatures,
   conditionConceptCounts = conditionConceptCounts,
   drugConceptCounts = drugConceptCounts
 )
@@ -136,6 +173,9 @@ profileData <- readRDS("e:/temp/profileData.rds")
 nDatabases <- profileData$normalizationData |>
   summarise(n_distinct(cdmSourceName)) |>
   pull()
+nPersons <- profileData$normalizationData |>
+  filter(analysisId == numberOfPersonsAnalysisId) |>
+  select(cdmSourceName, nPersons = countValue)
 
 # Restrict to concept IDs found in all databases:
 commonConditionConceptIds <- profileData$conditionConceptCounts |>
@@ -166,62 +206,86 @@ daysObserved <- inner_join(
   select("cdmSourceName", "daysObserved")
 
 # Combine and normalize
-vectors <- bind_rows(
-  profileData$drugConceptCounts,
-  conditionConceptCounts
+drugAndConditionvectors <- bind_rows(
+  profileData$drugConceptCounts |>
+    mutate(type = "Drug"),
+  conditionConceptCounts |>
+    mutate(type = "Condition")
 ) |>
   inner_join(daysObserved, by = join_by(cdmSourceName)) |>
-  mutate(value = recordCount / daysObserved)
+  mutate(covariateValue = recordCount / daysObserved) |>
+  select(databaseId = cdmSourceName, covariateId = conceptId, covariateValue, type) |>
+  as_tibble()
 
-# Reindex
-covariateIdToConceptId <- vectors |>
-  distinct(conceptId) |>
-  arrange(conceptId) |>
-  mutate(covariateId = row_number())
-databaseIdToCdmSourceName <- vectors |>
-  distinct(cdmSourceName) |>
-  arrange(cdmSourceName) |>
-  mutate(databaseId = row_number())
+otherVectors <- bind_rows(
+  otherFeatures |>
+    mutate(type = if_else(analysisId == visitAnalysisId, "Visit", "Demographic")),
+  normalizationData |>
+    filter(analysisId == lengthOfOpAnalysisId) |>
+    mutate(type = "Observation period")
+) |>
+  inner_join(nPersons, by = join_by(cdmSourceName  )) |>
+  mutate(covariateId = stratumId * 1000 + analysisId,
+         covariateValue = countValue / nPersons) |>
+  select(databaseId = cdmSourceName, covariateId, covariateValue, type) |>
+  as_tibble()
 
-vectors <- vectors |>
-  inner_join(covariateIdToConceptId, by = join_by(conceptId)) |>
-  inner_join(databaseIdToCdmSourceName, by = join_by(cdmSourceName)) |>
-  select("databaseId", databaseName = "cdmSourceName", "covariateId", covariateName = "conceptName", covariateValue = "value")
+vectors <- bind_rows(
+  drugAndConditionvectors,
+  otherVectors
+)
+
 
 # Compute distance -------------------------------------------------------------
-sMatrix <- sparseMatrix(
-  i = vectors$databaseId,
-  j = vectors$covariateId,
-  x = vectors$covariateValue,
-  dims = c(max(vectors$databaseId), max(vectors$covariateId)),
-  dimnames = list(
-    databaseIdToCdmSourceName$cdmSourceName,#paste0("db", 1:max(vectors$databaseId)), # Row names
-    covariateIdToConceptId$covariateId#paste0("cov", 1:max(vectors$covariateId)) # Column names
+library(dplyr)
+library(tidyr)
+library(text2vec)
+
+wideDf <- vectors |>
+  pivot_wider(
+    id_cols = c(databaseId, type),
+    names_from = covariateId,
+    values_from = covariateValue,
+    values_fill = list(covariateValue = 0)
   )
+computeCosineSimilarityByType <- function(data) {
+  # Remove databaseId and type columns for similarity computation
+  mat <- as.matrix(data |> select(-databaseId, -type))
+  rownames(mat) <- data$databaseId
+  simMatrix <- sim2(mat, method = "cosine", norm = "l2")
+
+  # Convert similarity matrix to tidy format
+  simDf <- as.data.frame(as.table(simMatrix))
+  colnames(simDf) <- c("databaseId1", "databaseId2", "cosineSimilarity")
+  simDf$type <- data$type[1]
+  return(simDf)
+}
+results <- wideDf |>
+  group_split(type) |>
+  lapply(computeCosineSimilarityByType) |>
+  bind_rows()
+
+results <- results |>
+  group_by(databaseId1, databaseId2) |>
+  summarise(similarity = mean(cosineSimilarity), .groups = "drop")
+fullMatrix <- results |>
+  pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "similarity", names_sort = TRUE)
+readr::write_csv(fullMatrix, "e:/temp/DatabaseCharacteristicsSimilarity.csv")
+
+# Heat map with hierarchical clustering ----------------------------------------
+matrix <- as.matrix(fullMatrix |> select(-databaseId1))
+rownames(matrix) <- fullMatrix$databaseId1
+matrix = 1 - matrix # Turn similarity into distance
+hc <- hclust(as.dist(matrix), method = "average")
+
+library(pheatmap)
+pheatmap(
+  matrix,                 # similarity matrix
+  clustering_method = "average", # match hclust method
+  clustering_distance_rows = as.dist(matrix),
+  clustering_distance_cols = as.dist(matrix),
+  display_numbers = FALSE,    # show numbers if you want
+  treeheight_row = 20,        # height of row dendrogram
+  treeheight_col = 20,         # height of col dendrogram
+  filename = "e:/temp/DatabaseCharacteristicsSimilarity.png"
 )
-rowNorms <- sqrt(rowSums(sMatrix^2))
-sMatrix <- sMatrix / rowNorms
-cosineSimilarity <- crossprod(t(sMatrix))
-
-readr::write_csv(as.data.frame(as.matrix(cosineSimilarity)), "e:/temp/cs.csv")
-
-# Plot -------------------------------------------------------------------------
-umapSettings <- umap::umap.defaults
-umapSettings$metric <- "cosine"
-umapSettings$n_neighbors <- 2
-umapSettings$min_dist <- 0.001
-map <- umap::umap(cosineSimilarity, input = "dist", config = umapSettings)
-
-vizData <- tibble(
-  databaseName = rownames(map$layout),
-  x = map$layout[, 1],
-  y = map$layout[, 2]
-)
-
-ggplot(vizData, aes(x = x, y = y)) +
-  # geom_point(alpha = 0.6, size = 2, color = "#4285F4") +
-  geom_label(aes(label = databaseName), hjust = 0.5, vjust = 0.5) +
-  theme_minimal()
-
-
-
