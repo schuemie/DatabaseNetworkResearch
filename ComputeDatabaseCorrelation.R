@@ -1,3 +1,6 @@
+# Code for computing correlation between databases based on their estimates, using a frequentist
+# approach. This doesn't really seem to work.
+
 library(mvtnorm)
 library(dplyr)
 library(tidyr)

@@ -30,7 +30,8 @@ SELECT database_id,
     target.exposure_name AS target_name,
     comparator_id,
     comparator.exposure_name AS comparator_name,
-    outcome_id,
+    cohort_method_result.outcome_id,
+    outcome_name,
     analysis_id,
     CASE WHEN analysis_id = 7 THEN 'unadjusted' ELSE 'PS matched' END AS analysis_name,
     log_rr,
@@ -40,6 +41,8 @@ INNER JOIN @schema.exposure_of_interest target
   ON target_id = target.exposure_id
 INNER JOIN @schema.exposure_of_interest comparator
   ON comparator_id = comparator.exposure_id
+LEFT JOIN @schema.outcome_of_interest
+  ON cohort_method_result.outcome_id = outcome_of_interest.outcome_id
 WHERE se_log_rr IS NOT NULL
     AND analysis_id IN (7, 8)
     AND target.exposure_name LIKE '%main ot2'
@@ -55,6 +58,7 @@ estimates <- estimates |>
          analysisName = as.factor(analysisName),
          targetName = as.factor(gsub(" main ot2", "", targetName)),
          comparatorName = as.factor(gsub(" main ot2", "", comparatorName)),
+         outcomeName = as.factor(gsub("_", " ", gsub("outcome/", "", outcomeName))),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
 legendLabel <- "T2dm"
@@ -91,7 +95,8 @@ SELECT DISTINCT database_id,
     target.exposure_name AS target_name,
     comparator_id,
     comparator.exposure_name AS comparator_name,
-    outcome_id,
+    cohort_method_result.outcome_id,
+    outcome_name,
     analysis_id,
     CASE WHEN analysis_id = 1 THEN 'PS stratification' ELSE 'PS matching' END AS analysis_name,
     log_rr,
@@ -105,11 +110,13 @@ INNER JOIN @schema.single_exposure_of_interest comparator
   ON comparator_id = comparator.exposure_id
 INNER JOIN @schema.exposure_group comparator_group
   ON comparator_group.exposure_id = comparator.exposure_id
+LEFT JOIN @schema.outcome_of_interest
+  ON cohort_method_result.outcome_id = outcome_of_interest.outcome_id
 WHERE se_log_rr IS NOT NULL
     AND analysis_id IN (1, 3)
     AND target_group.exposure_group = 'Drug class'
     AND comparator_group.exposure_group = 'Drug class'
-    AND outcome_id IN (@outcome_ids)
+    AND cohort_method_result.outcome_id IN (@outcome_ids)
     AND database_id != 'Meta-analysis';
 "
 estimates <- renderTranslateQuerySql(connection = connection,
@@ -122,6 +129,7 @@ estimates <- estimates |>
          analysisName = as.factor(analysisName),
          targetName = as.factor(targetName),
          comparatorName = as.factor(comparatorName),
+         outcomeName = as.factor(outcomeName),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
 legendLabel <- "Htn"
@@ -339,7 +347,7 @@ vizData <- taus |>
 ggplot(vizData, aes(y = tau)) +
   geom_hline(yintercept = 0, size = 1) +
   geom_hline(yintercept = expectedTauUnderPrior, linetype = "dashed") +
-  geom_boxplot(fill = "#3f845a", alpha = 0.75) +
+  geom_boxplot(fill = "#336B91", alpha = 0.75) +
   scale_y_continuous("Tau") +
   facet_nested(~ type + analysisName) +
   theme(
@@ -376,7 +384,7 @@ for (i in seq_along(tauSamples)) {
 }
 vizData <- bind_rows(vizData)
 ggplot(vizData, aes(x = tau)) +
-  geom_density(fill = "#3f845a", alpha = 0.75) +
+  geom_density(fill = "#336B91", alpha = 0.75) +
   geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
   scale_x_continuous("Tau") +
   scale_y_continuous("Density") +
@@ -387,7 +395,7 @@ ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
 # ggsave(sprintf("TauPosteriorsCalibrated_%s.png", legendLabel), width = 6, height = 5)
 
 ggplot(vizData |> filter(analysisName == "PS matched", type == "Negative control"), aes(x = tau)) +
-  geom_density(fill = "#3f845a", alpha = 0.75) +
+  geom_density(fill = "#336B91", alpha = 0.75) +
   geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
   scale_x_continuous("Tau") +
   scale_y_continuous("Density") +
@@ -533,26 +541,26 @@ readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", 
 
 
 # Non-Bayesian correlation metric ------------------------------------------------------------------
-source("ComputeDatabaseCorrelation.R")
-estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-analysisName <- unique(estimates$analysisName)[2]
-analysisName
-
-atLeastNddbs <- estimates |>
-  filter(analysisName == !!analysisName) |>
-  group_by(targetId, comparatorId, outcomeId) |>
-  summarise(n = n(), .groups = "drop") |>
-  filter(n >= minDatabases) |>
-  arrange(targetId, comparatorId, outcomeId) |>
-  mutate(dummyOutcomeId = row_number())
-
-dataLong <- estimates |>
-  filter(analysisName == !!analysisName) |>
-  inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
-  select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
-
-model <- estimateCorrelationMatrix(dataLong)
-model
+# source("ComputeDatabaseCorrelation.R")
+# estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+# analysisName <- unique(estimates$analysisName)[2]
+# analysisName
+#
+# atLeastNddbs <- estimates |>
+#   filter(analysisName == !!analysisName) |>
+#   group_by(targetId, comparatorId, outcomeId) |>
+#   summarise(n = n(), .groups = "drop") |>
+#   filter(n >= minDatabases) |>
+#   arrange(targetId, comparatorId, outcomeId) |>
+#   mutate(dummyOutcomeId = row_number())
+#
+# dataLong <- estimates |>
+#   filter(analysisName == !!analysisName) |>
+#   inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
+#   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
+#
+# model <- estimateCorrelationMatrix(dataLong)
+# model
 
 # Compute tau for calibrated estimates -------------------------------------------------------------
 # We shouldn't really do this as systematic error will be correlated between databases, but it can
@@ -644,3 +652,74 @@ saveRDS(tauSamples, sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 # tauSamples <- readRDS(sprintf("tauSamples_%s.rds", legendLabel))
 # median(tauSamples[[1]])
 # tauSamples <- readRDS(sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
+
+# Explore individual TCO examples ------------------------------------------------------------------
+source("ForestPlot.R")
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
+analysisName <- unique(estimates$analysisName)[2]
+analysisName
+
+atLeastNdbs <- estimates |>
+  filter(negativeControl == FALSE, analysisName == !!analysisName) |>
+  group_by(targetId, comparatorId, outcomeId) |>
+  summarise(nDatabases = n(), .groups = "drop") |>
+  filter(nDatabases >= minDatabases)
+
+hasJmdc <- estimates |>
+  filter(negativeControl == FALSE, analysisName == !!analysisName, databaseId == "JMDC") |>
+  distinct(targetId, comparatorId, outcomeId)
+
+highPowerTcos <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(
+    atLeastNdbs,
+    by = join_by(targetId, comparatorId, outcomeId)
+  ) |>
+  inner_join(hasJmdc) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName) |>
+  summarise(maxSeLogRr = max(seLogRr), .groups = "drop") |>
+  arrange(maxSeLogRr)
+highPowerTcos
+example <- highPowerTcos[1, ]
+example
+dbGroupings <- tibble(
+  databaseId = c("CCAE", "CUIMC", "Germany_DA", "MDCD", "MDCR", "OptumDod", "OptumEHR", "SIDIAP", "UK_IMRD", "US_Open_Claims", "VA-OMOP", "CUMC", "IMSG", "JMDC", "NHIS_NSC", "Optum", "Panther"),
+  country = c("USA", "USA", "Germany", "USA", "USA", "USA", "USA", "Spain", "UK", "USA", "USA", "USA", "Germany", "Japan", "South Korea", "USA", "USA"),
+  type = c("Claims", "EHR", "EHR", "Claims", "Claims", "Claims", "EHR", "SIDIAP", "EHR", "Claims", "EHR", "EHR", "EHR", "Claims", "Claims", "Claims", "EHR"),
+)
+exampleEstimates <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName)) |>
+  inner_join(dbGroupings, by = join_by(databaseId)) |>
+  arrange(databaseId)
+plotForest(data = exampleEstimates,
+           labels = exampleEstimates$databaseId,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/exampleTco.png")
+
+subset <- filter(exampleEstimates, type == "EHR")
+plotForest(data = subset,
+           labels = subset$databaseId,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/exampleTco_EHRs.png")
+
+subset <- filter(exampleEstimates, type == "Claims")
+plotForest(data = subset,
+           labels = subset$databaseId,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/exampleTco_Claims.png")
+
+subset <- filter(exampleEstimates, country == "USA")
+plotForest(data = subset,
+           labels = subset$databaseId,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/exampleTco_USA.png")
+
+# writeLines(paste(unique(estimates$databaseId), collapse = '", "'))
+
+

@@ -246,7 +246,7 @@ plotTauPosterior <- function(results) {
                       pull(tauSample) |>
                       unlist())
   ggplot(vizData, aes(x = tau)) +
-    geom_density(fill = "#3f845a", alpha = 0.75) +
+    geom_density(fill = "#336B91", alpha = 0.75) +
     geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
     scale_x_continuous("Tau") +
     scale_y_continuous("Density") +
@@ -341,22 +341,26 @@ nDatabases <- allRows |>
 vizData <- bind_rows(
   allRows |>
     filter(publicationBias == FALSE) |>
-    select(method, precision, nDatabases) |>
+    select(method, precision, nDatabases, databaseHeterogeneity) |>
     mutate(interval = "Confidence interval"),
   allRows |>
     filter(publicationBias == FALSE) |>
-    select(method, precision = precisionPi, nDatabases) |>
+    select(method, precision = precisionPi, nDatabases, databaseHeterogeneity) |>
     mutate(interval = "Prediction interval")
 ) |>
-  inner_join(nDatabases, by = join_by(nDatabases))
+  inner_join(nDatabases, by = join_by(nDatabases)) |>
+  mutate(databaseHeterogeneity = if_else(databaseHeterogeneity == "high", "High", "Low"))
 
-ggplot(vizData, aes(x = x, y = precision, group = x)) +
-  geom_violin(scale = "width", fill = "#3f845a", alpha = 0.75) +
+ggplot(vizData, aes(x = jitter(x, factor = 0.5), y = precision, color = databaseHeterogeneity)) +
+  geom_point(alpha = 0.75) +
   scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
   scale_y_log10("Precision") +
+  scale_color_manual(values = c("#EB6622", "#336B91")) +
+  guides(color = guide_legend(title="Database heterogeneity")) +
   facet_grid(interval ~ method) +
   theme(
-    panel.grid.minor.x = element_blank()
+    panel.grid.minor = element_blank(),
+    legend.position = "top"
   )
 ggsave("SimPrecision.png", width = 5.5, height = 4)
 
@@ -368,23 +372,28 @@ nDatabases <- allRows |>
 vizData <- bind_rows(
   allRows |>
     filter(publicationBias == FALSE) |>
-    select(method, coverage, nDatabases) |>
+    select(method, coverage, nDatabases, databaseHeterogeneity) |>
     mutate(interval = "Confidence interval"),
   allRows |>
     filter(publicationBias == FALSE) |>
-    select(method, coverage = coveragePi, nDatabases) |>
+    select(method, coverage = coveragePi, nDatabases, databaseHeterogeneity) |>
     mutate(interval = "Prediction interval")
 ) |>
-  inner_join(nDatabases, by = join_by(nDatabases))
+  inner_join(nDatabases, by = join_by(nDatabases)) |>
+  mutate(databaseHeterogeneity = if_else(databaseHeterogeneity == "high", "High", "Low"))
 
-ggplot(vizData, aes(x = x, y = coverage, group = x)) +
+ggplot(vizData, aes(x = jitter(x, factor = 0.5), y = coverage, color = databaseHeterogeneity)) +
   geom_hline(yintercept = 0.95, linetype = "dashed") +
-  geom_violin(scale = "width", fill = "#3f845a", alpha = 0.75) +
+  geom_point(alpha = 0.75) +
+  # geom_violin(scale = "width", fill = "#3f845a", alpha = 0.75) +
   scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
   scale_y_continuous("Coverage of the 95% interval", limits = c(0, 1)) +
+  scale_color_manual(values = c("#EB6622", "#336B91")) +
+  guides(color = guide_legend(title="Database heterogeneity")) +
   facet_grid(interval ~ method) +
   theme(
-    panel.grid.minor.x = element_blank()
+    panel.grid.minor = element_blank(),
+    legend.position = "top"
   )
 ggsave("SimCoverage.png", width = 5.5, height = 4)
 
@@ -396,61 +405,62 @@ nDatabases <- allRows |>
 vizData <- bind_rows(
   allRows |>
     filter(publicationBias == FALSE) |>
-    transmute(method, error = if_else(trueEffect == "null", type1, type2), nDatabases, type = if_else(trueEffect == "null", "Type 1", "Type 2"), trueEffect) |>
+    transmute(method, error = if_else(trueEffect == "null", type1, type2), nDatabases, type = if_else(trueEffect == "null", "Type 1", "Type 2"), databaseHeterogeneity) |>
     mutate(interval = "Confidence interval"),
   allRows |>
     filter(publicationBias == FALSE) |>
-    transmute(method, error = if_else(trueEffect == "null", type1Pi, type2Pi), nDatabases, type = if_else(trueEffect == "null", "Type 1", "Type 2"), trueEffect) |>
+    transmute(method, error = if_else(trueEffect == "null", type1Pi, type2Pi), nDatabases, type = if_else(trueEffect == "null", "Type 1", "Type 2"), databaseHeterogeneity) |>
     mutate(interval = "Prediction interval")
 ) |>
-  inner_join(nDatabases, by = join_by(nDatabases))
+  inner_join(nDatabases, by = join_by(nDatabases)) |>
+  mutate(databaseHeterogeneity = if_else(databaseHeterogeneity == "high", "High", "Low"))
 ref <- vizData |>
   filter(type == "Type 1") |>
   distinct(method, interval, type) |>
   mutate(reference = 0.05)
 
-ggplot(vizData, aes(x = x, y = error, color = trueEffect)) +
+ggplot(vizData, aes(x = jitter(x, factor = 0.5), y = error, color = databaseHeterogeneity)) +
   geom_hline(aes(yintercept = reference), linetype = "dashed", data = ref) +
   geom_point(alpha = 0.75) +
-  scale_color_manual(values = c("#d99b77", "#3f845a", "#73655d")) +
   scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
   scale_y_continuous("Error", limits = c(0, 1)) +
-  guides(color=guide_legend(title="True effect")) +
+  scale_color_manual(values = c("#EB6622", "#336B91")) +
+  guides(color = guide_legend(title="Database heterogeneity")) +
   facet_nested(interval ~ method + type) +
   theme(
-    panel.grid.minor.x = element_blank(),
+    panel.grid.minor = element_blank(),
     legend.position = "top"
   )
-ggsave("SimType1And2Error.png", width = 5.5, height = 4)
+ggsave("SimType1And2Error.png", width = 6.5, height = 4)
 
 # Replication per nDatabases, interval, true effect
-nDatabases <- allRows |>
-  distinct(nDatabases) |>
-  arrange(nDatabases) |>
-  mutate(x = row_number())
-vizData <- bind_rows(
-  allRows |>
-    transmute(method, fraction = signReproSign / sign, nDatabases, trueEffect, publicationBias) |>
-    mutate(interval = "Confidence interval"),
-  allRows |>
-    transmute(method, fraction = signPiReproSign / signPi, nDatabases, trueEffect, publicationBias) |>
-    mutate(interval = "Prediction interval")
-) |>
-  inner_join(nDatabases, by = join_by(nDatabases)) |>
-  mutate(publicationBias = if_else(publicationBias, "Yes", "No"))
-
-ggplot(vizData, aes(x = x, y = fraction, group = x, color = publicationBias)) +
-  geom_point(alpha = 0.75) +
-  scale_color_manual(values = c("#3f845a", "#d99b77", "#73655d")) +
-  scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
-  scale_y_continuous("Fraction of significant results that replicate", limits = c(0, 1)) +
-  guides(color=guide_legend(title="Publication bias")) +
-  facet_nested(interval ~ method + trueEffect) +
-  theme(
-    panel.grid.minor.x = element_blank(),
-    legend.position = "top"
-  )
-ggsave("SimReplication.png", width = 6, height = 4)
+# nDatabases <- allRows |>
+#   distinct(nDatabases) |>
+#   arrange(nDatabases) |>
+#   mutate(x = row_number())
+# vizData <- bind_rows(
+#   allRows |>
+#     transmute(method, fraction = signReproSign / sign, nDatabases, trueEffect, publicationBias) |>
+#     mutate(interval = "Confidence interval"),
+#   allRows |>
+#     transmute(method, fraction = signPiReproSign / signPi, nDatabases, trueEffect, publicationBias) |>
+#     mutate(interval = "Prediction interval")
+# ) |>
+#   inner_join(nDatabases, by = join_by(nDatabases)) |>
+#   mutate(publicationBias = if_else(publicationBias, "Yes", "No"))
+#
+# ggplot(vizData, aes(x = x, y = fraction, group = x, color = publicationBias)) +
+#   geom_point(alpha = 0.75) +
+#   scale_color_manual(values = c("#3f845a", "#d99b77", "#73655d")) +
+#   scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
+#   scale_y_continuous("Fraction of significant results that replicate", limits = c(0, 1)) +
+#   guides(color=guide_legend(title="Publication bias")) +
+#   facet_nested(interval ~ method + trueEffect) +
+#   theme(
+#     panel.grid.minor.x = element_blank(),
+#     legend.position = "top"
+#   )
+# ggsave("SimReplication.png", width = 6, height = 4)
 
 
 # Agreement per interval
@@ -460,28 +470,30 @@ nDatabases <- allRows |>
   mutate(x = row_number())
 vizData <- bind_rows(
   allRows |>
-    transmute(method, reproDisagreeCi, nDatabases, trueEffect, publicationBias) |>
+    transmute(method, reproDisagreeCi, nDatabases, trueEffect, publicationBias, databaseHeterogeneity) |>
     mutate(interval = "Confidence interval"),
   allRows |>
-    transmute(method, reproDisagreeCi = reproDisagreePi, nDatabases, trueEffect, publicationBias) |>
+    transmute(method, reproDisagreeCi = reproDisagreePi, nDatabases, trueEffect, publicationBias, databaseHeterogeneity) |>
     mutate(interval = "Prediction interval")
 ) |>
   inner_join(nDatabases, by = join_by(nDatabases)) |>
-  mutate(publicationBias = if_else(publicationBias, "Yes", "No"))
+  mutate(publicationBias = if_else(publicationBias, "Yes", "No"),
+         databaseHeterogeneity = if_else(databaseHeterogeneity == "high", "High", "Low"))
 
-ggplot(vizData, aes(x = x, y = reproDisagreeCi, group = x, color = publicationBias)) +
+ggplot(vizData, aes(x = jitter(x, factor = 0.5), y = reproDisagreeCi, group = x, shape = publicationBias, color = databaseHeterogeneity)) +
   geom_hline(yintercept = 0.05, linetype = "dashed") +
   geom_point(alpha = 0.75) +
-  scale_color_manual(values = c("#3f845a", "#d99b77", "#73655d")) +
   scale_x_continuous("Numer of databases in study", breaks = nDatabases$x, labels = nDatabases$nDatabases) +
   scale_y_continuous("Fraction rejection of null", limits = c(0, 1)) +
-  guides(color=guide_legend(title="Publication bias")) +
+  scale_color_manual(values = c("#EB6622", "#336B91")) +
+  guides(color = guide_legend(title="Database heterogeneity")) +
+  guides(shape = guide_legend(title="Publication bias")) +
   facet_nested(interval ~ method + trueEffect) +
   theme(
-    panel.grid.minor.x = element_blank(),
+    panel.grid.minor = element_blank(),
     legend.position = "top"
   )
-ggsave("SimReplicationSignificantDifferent.png", width = 5.5, height = 4)
+ggsave("SimReplicationSignificantDifferent.png", width = 6.5, height = 4)
 
 
 
