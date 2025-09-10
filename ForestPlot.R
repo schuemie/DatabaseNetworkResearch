@@ -41,7 +41,7 @@ plotForest <- function(data,
 
   d3 <- tibble()
   if (showFixedEffects || showRandomEffects) {
-    ma <- summary(meta::metagen(data$logRr, data$seLogRr, prediction = TRUE))
+    ma <- summary(meta::metagen(data$logRr, data$seLogRr, prediction = TRUE, level.ci = 1 - alpha))
     if (showFixedEffects) {
       d3 <- bind_rows(
         d3,
@@ -68,7 +68,7 @@ plotForest <- function(data,
     }
   }
   if (showBayesianRandomEffects) {
-    estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data)
+    estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, alpha = alpha)
     d3 <- bind_rows(
       d3,
       tibble(
@@ -82,7 +82,7 @@ plotForest <- function(data,
   }
   if (showPredictionInterval) {
     if (showBayesianRandomEffects) {
-      predictionInterval <- computePredictionInterval(estimate)
+      predictionInterval <- computePredictionInterval(estimate, alpha)
     } else if (showRandomEffects) {
       predictionInterval <- c(ma$predict$lower, ma$predict$upper)
     } else {
@@ -131,11 +131,12 @@ plotForest <- function(data,
     geom_rect(xmin = -10, xmax = 10, ymin = 0, ymax = maBoundaryY, size = 0, fill = "#69AED5", alpha = 0.25, data = tibble(logRr = 1, y = 1)) +
     geom_segment(aes(x = x, y = y, xend = x, yend = yend), color = "#AAAAAA",  size = 0.2, data = data.frame(x = breaks, y = 0, yend = max(d$y) - 0.5)) +
     geom_segment(aes(x = x, y = y, xend = x, yend = yend), size = 0.5, data = data.frame(x = 1, y = 0, yend = max(d$y) - 0.5)) +
+    geom_hline(aes(yintercept = max(d$y) - 0.5)) +
     geom_errorbarh(aes(
       xmin = exp(logLb95Ci),
       xmax = exp(logUb95Ci)
     ), height = 0.15) +
-    geom_point(size = 3, shape = 23, aes(fill = type)) +
+    geom_point(size = 3, shape = 16, aes(fill = type)) +
     geom_polygon(aes(x = x, y = y, group = group), data = diamondData) +
     scale_fill_manual(values = c("#000000", "#000000", "#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF")) +
     scale_x_continuous(xLabel, trans = "log10", breaks = breaks, labels = breaks) +
@@ -146,13 +147,14 @@ plotForest <- function(data,
       panel.background = element_blank(),
       legend.position = "none",
       panel.border = element_blank(),
-      axis.text.x = element_text(colour = "black"),
+      axis.text.x = element_text(color = "black"),
       axis.text.y = element_blank(),
-      axis.ticks = element_blank(),
+      axis.ticks.y = element_blank(),
       axis.title.y = element_blank(),
+      axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, -0.19), "lines")
     )
-  #rightPlot
+  # rightPlot
   d$logLb95Ci[is.infinite(d$logLb95Ci)] <- NA
   d$logUb95Ci[is.infinite(d$logUb95Ci)] <- NA
   d$logRr[exp(d$logRr) < limits[1] | exp(d$logRr) > limits[2]] <- NA
@@ -183,10 +185,11 @@ plotForest <- function(data,
       panel.background = element_blank(),
       legend.position = "none",
       panel.border = element_blank(),
-      axis.text.x = element_text(colour = "white"),
+      axis.text.x = element_text(color = "white"),
       axis.text.y = element_blank(),
       axis.ticks = element_blank(),
       axis.title.y = element_blank(),
+      axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, 0), "lines")
     )
   plot <- gridExtra::grid.arrange(leftPlot, rightPlot, ncol = 2, widths = c(1.5, 1), padding = unit(0, "line"))
