@@ -1,16 +1,19 @@
-# Compute similarity between databases based on aggregate statistcs (already collected for database
+# Compute similarity between databases based on aggregate statistics (already collected for database
 # diagnostics).
-# Currently restricting to drugs (ingredients) and conditions, because
-# 1. Other characteristics like demographics will likely get swamped by these anyway.
-# 2. Drugs and ingredients will be correlated with everything else, and are therefore good proxies.
-# 3. We can make drugs and conditions very similar in terms of standard concepts, so focusing on the
-#    content differences, not the coding differences.
+# Constructing features in five categories
+# 1. Demographics (age, gender)
+# 2. Observatin periods (length)
+# 3. Visits (by visit_concept_id)
+# 4. Conditions (including ancestors, restricted to concepts shared across all DBs)
+# 5. Drugs (ingredients)
 
 library(DatabaseConnector)
 library(dplyr)
-library(Matrix)
-library(umap)
 library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(text2vec) # install.packages("text2vec")
+library(pheatmap) # install.packages("pheatmap")
 
 connectionDetails <- createConnectionDetails(
   dbms = "postgresql",
@@ -21,9 +24,13 @@ connectionDetails <- createConnectionDetails(
 
 profilesDatabaseSchema <- "dp_temp"
 profilesTable <- "db_profile_results"
-vocabularyDatabaseSchema <- "vocabulary_20240229"
+vocabularyDatabaseSchema <- "vocabulary_20240229" # Needed for concept hierarchy
+outputFolder <- "e:/temp"
+
+# Probably no need to change anything below here -------------------------------
 
 # Fetch data -------------------------------------------------------------------
+
 # Needed for normalization of counts
 numberOfPersonsAnalysisId <- 1
 numberOfOpAnalysisId <- 113
@@ -83,7 +90,6 @@ otherFeatures <- renderTranslateQuerySql(
                    visitAnalysisId),
   snakeCaseToCamelCase = TRUE
 )
-
 
 sql <- "
 SELECT cdm_source_name,
@@ -166,10 +172,10 @@ profileData <- list(
   conditionConceptCounts = conditionConceptCounts,
   drugConceptCounts = drugConceptCounts
 )
-saveRDS(profileData, "e:/temp/profileData.rds")
+saveRDS(profileData, file.path(outputFolder, "profileData.rds"))
 
 # Normalize data ---------------------------------------------------------------
-profileData <- readRDS("e:/temp/profileData.rds")
+profileData <- readRDS(file.path(outputFolder, "profileData.rds"))
 nDatabases <- profileData$normalizationData |>
   summarise(n_distinct(cdmSourceName)) |>
   pull()
@@ -237,10 +243,6 @@ vectors <- bind_rows(
 
 
 # Compute distance -------------------------------------------------------------
-library(dplyr)
-library(tidyr)
-library(text2vec)
-
 wideDf <- vectors |>
   pivot_wider(
     id_cols = c(databaseId, type),
@@ -248,18 +250,17 @@ wideDf <- vectors |>
     values_from = covariateValue,
     values_fill = list(covariateValue = 0)
   )
+
 computeCosineSimilarityByType <- function(data) {
-  # Remove databaseId and type columns for similarity computation
   mat <- as.matrix(data |> select(-databaseId, -type))
   rownames(mat) <- data$databaseId
   simMatrix <- sim2(mat, method = "cosine", norm = "l2")
-
-  # Convert similarity matrix to tidy format
   simDf <- as.data.frame(as.table(simMatrix))
   colnames(simDf) <- c("databaseId1", "databaseId2", "cosineSimilarity")
   simDf$type <- data$type[1]
   return(simDf)
 }
+
 results <- wideDf |>
   group_split(type) |>
   lapply(computeCosineSimilarityByType) |>
@@ -270,7 +271,7 @@ results <- results |>
   summarise(similarity = mean(cosineSimilarity), .groups = "drop")
 fullMatrix <- results |>
   pivot_wider(id_cols = "databaseId1", names_from = "databaseId2", values_from = "similarity", names_sort = TRUE)
-readr::write_csv(fullMatrix, "e:/temp/DatabaseCharacteristicsSimilarity.csv")
+readr::write_csv(fullMatrix, file.path(outputFolder, "DatabaseCharacteristicsSimilarity.csv"))
 
 # Heat map with hierarchical clustering ----------------------------------------
 matrix <- as.matrix(fullMatrix |> select(-databaseId1))
@@ -278,14 +279,13 @@ rownames(matrix) <- fullMatrix$databaseId1
 matrix = 1 - matrix # Turn similarity into distance
 hc <- hclust(as.dist(matrix), method = "average")
 
-library(pheatmap)
 pheatmap(
   matrix,                 # similarity matrix
   clustering_method = "average", # match hclust method
   clustering_distance_rows = as.dist(matrix),
   clustering_distance_cols = as.dist(matrix),
   display_numbers = FALSE,    # show numbers if you want
-  treeheight_row = 20,        # height of row dendrogram
-  treeheight_col = 20,         # height of col dendrogram
-  filename = "e:/temp/DatabaseCharacteristicsSimilarity.png"
+  treeheight_row = 50,        # height of row dendrogram
+  treeheight_col = 50,         # height of col dendrogram
+  filename = file.path(outputFolder, "DatabaseCharacteristicsSimilarity.png")
 )
