@@ -267,10 +267,11 @@ for (nDatabases in c(1, 2, 4, 10)) {
   for (trueEffect in c("null", "fixed", "random")) {
     for (publicationBias in c(FALSE, TRUE)) {
       for (databaseHeterogeneity in c("high", "low")) {
-        message(sprintf("Simulating %d databases, true effect is %s, with%s publication bias",
+        message(sprintf("Simulating %d databases, true effect is %s, with%s publication bias, %s database heterogeneity",
                         nDatabases,
                         trueEffect,
-                        if (publicationBias) "" else " no"))
+                        if (publicationBias) "" else " no",
+                        databaseHeterogeneity))
         if (nDatabases == 1) {
           seLogRrs <- poolSes(0.2, 0.2)
         } else if (nDatabases == 2) {
