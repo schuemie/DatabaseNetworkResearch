@@ -1,11 +1,15 @@
 # Compute similarity between databases based on aggregate statistics (already collected for database
 # diagnostics).
-# Constructing features in five categories
+# Constructing features in five categories:
 # 1. Demographics (age, gender)
 # 2. Observatin periods (length)
 # 3. Visits (by visit_concept_id)
 # 4. Conditions (including ancestors, restricted to concepts shared across all DBs)
 # 5. Drugs (ingredients)
+#
+# We then compute cosine similarity in each category, and average to get a single similarity metric
+# between databases. The results are written to the output folder as a similarity matrix (csv) and
+# hierarchical clustering (png).
 
 library(DatabaseConnector)
 library(dplyr)

@@ -15,6 +15,7 @@ plotForest <- function(data,
                        showRandomEffects = TRUE,
                        showBayesianRandomEffects = TRUE,
                        showPredictionInterval = TRUE,
+                       title = NULL,
                        fileName = NULL) {
   d1 <- data.frame(
     logRr = -100,
@@ -192,7 +193,7 @@ plotForest <- function(data,
       axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, 0), "lines")
     )
-  plot <- gridExtra::grid.arrange(leftPlot, rightPlot, ncol = 2, widths = c(1.5, 1), padding = unit(0, "line"))
+  plot <- gridExtra::grid.arrange(leftPlot, rightPlot, ncol = 2, widths = c(1.5, 1), padding = unit(0, "line"), top = title)
   if (!is.null(fileName)) {
     ggsave(fileName, plot, width = 7, height = 1 + max(d$y) * 0.3, dpi = 300)
   }

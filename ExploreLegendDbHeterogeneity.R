@@ -31,7 +31,7 @@ SELECT database_id,
     comparator_id,
     comparator.exposure_name AS comparator_name,
     cohort_method_result.outcome_id,
-    outcome_name,
+    COALESCE(outcome_of_interest.outcome_name, negative_control_outcome.outcome_name) AS outcome_name,
     analysis_id,
     CASE WHEN analysis_id = 7 THEN 'unadjusted' ELSE 'PS matched' END AS analysis_name,
     log_rr,
@@ -43,6 +43,8 @@ INNER JOIN @schema.exposure_of_interest comparator
   ON comparator_id = comparator.exposure_id
 LEFT JOIN @schema.outcome_of_interest
   ON cohort_method_result.outcome_id = outcome_of_interest.outcome_id
+LEFT JOIN @schema.negative_control_outcome
+  ON cohort_method_result.outcome_id = negative_control_outcome.outcome_id
 WHERE se_log_rr IS NOT NULL
     AND analysis_id IN (7, 8)
     AND target.exposure_name LIKE '%main ot2'
@@ -96,7 +98,7 @@ SELECT DISTINCT database_id,
     comparator_id,
     comparator.exposure_name AS comparator_name,
     cohort_method_result.outcome_id,
-    outcome_name,
+    COALESCE(outcome_of_interest.outcome_name, negative_control_outcome.outcome_name) AS outcome_name,
     analysis_id,
     CASE WHEN analysis_id = 1 THEN 'PS stratification' ELSE 'PS matching' END AS analysis_name,
     log_rr,
@@ -112,6 +114,8 @@ INNER JOIN @schema.exposure_group comparator_group
   ON comparator_group.exposure_id = comparator.exposure_id
 LEFT JOIN @schema.outcome_of_interest
   ON cohort_method_result.outcome_id = outcome_of_interest.outcome_id
+LEFT JOIN @schema.negative_control_outcome
+  ON cohort_method_result.outcome_id = negative_control_outcome.outcome_id
 WHERE se_log_rr IS NOT NULL
     AND analysis_id IN (1, 3)
     AND target_group.exposure_group = 'Drug class'
@@ -660,14 +664,16 @@ estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 analysisName <- unique(estimates$analysisName)[2]
 analysisName
 
+negativeControls <- TRUE
+
 atLeastNdbs <- estimates |>
-  filter(negativeControl == FALSE, analysisName == !!analysisName) |>
+  filter(negativeControl == !!negativeControls, analysisName == !!analysisName) |>
   group_by(targetId, comparatorId, outcomeId) |>
   summarise(nDatabases = n(), .groups = "drop") |>
   filter(nDatabases >= minDatabases)
 
 hasJmdc <- estimates |>
-  filter(negativeControl == FALSE, analysisName == !!analysisName, databaseId == "JMDC") |>
+  filter(negativeControl == !!negativeControls, analysisName == !!analysisName, databaseId == "JMDC") |>
   distinct(targetId, comparatorId, outcomeId)
 
 highPowerTcos <- estimates |>
@@ -676,12 +682,18 @@ highPowerTcos <- estimates |>
     atLeastNdbs,
     by = join_by(targetId, comparatorId, outcomeId)
   ) |>
-  inner_join(hasJmdc) |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName) |>
   summarise(maxSeLogRr = max(seLogRr), .groups = "drop") |>
   arrange(maxSeLogRr)
+if ("JMDC" %in% estimates$databaseId) {
+  highPowerTcos <- highPowerTcos |>
+    inner_join(hasJmdc)
+}
 highPowerTcos
-example <- highPowerTcos[1, ]
+
+
+
+example <- highPowerTcos[35, ]
 example
 dbGroupings <- tibble(
   databaseId = c("CCAE", "CUIMC", "Germany_DA", "MDCD", "MDCR", "OptumDod", "OptumEHR", "SIDIAP", "UK_IMRD", "US_Open_Claims", "VA-OMOP", "CUMC", "IMSG", "JMDC", "NHIS_NSC", "Optum", "Panther"),
@@ -720,6 +732,39 @@ plotForest(data = subset,
            showRandomEffects = FALSE,
            fileName = "Symposium/exampleTco_USA.png")
 
+
+
 # writeLines(paste(unique(estimates$databaseId), collapse = '", "'))
 
+# Picking example for symposium:
+outcomesOfInterest <- c("Acute myocardial infarction",
+                        "Heart failure",
+                        "Hospitalization with heart failure",
+                        "Ischemic stroke",
+                        "Stroke",
+                        "Venous thromboembolic events",
+                        "Venous thromboembolic events ",
+                        "Ingrowing nail",
+                        "Impacted cerumen",
+                        "Contusion of knee")
+examples <- highPowerTcos |>
+  filter(outcomeName %in% outcomesOfInterest) |>
+  group_by(outcomeName) |>
+  slice_min(order_by = maxSeLogRr, n = 5)  |>
+  ungroup()
+
+for (i in seq_len(nrow(examples))) {
+  example <- examples[i, ]
+  exampleEstimates <- estimates |>
+    filter(analysisName == !!analysisName) |>
+    inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName)) |>
+    arrange(databaseId)
+  plotForest(data = exampleEstimates,
+             labels = exampleEstimates$databaseId,
+             showFixedEffects = FALSE,
+             showRandomEffects = FALSE,
+             title = sprintf("%s vs %s\n%s", example$targetName, example$comparatorName, example$outcomeName),
+             fileName = sprintf("Symposium/Patrick/Forest_t%d_c_%d_o%d_%s.png", example$targetId, example$comparatorId, example$outcomeId, legendLabel))
+
+}
 
