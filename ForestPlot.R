@@ -8,6 +8,7 @@ library(dplyr)
 
 plotForest <- function(data,
                        labels = paste("Site", seq_len(nrow(data))),
+                       exclude = NULL,
                        xLabel = "Hazard Ratio",
                        limits = c(0.1, 10),
                        alpha = 0.05,
@@ -22,7 +23,8 @@ plotForest <- function(data,
     logLb95Ci = -100,
     logUb95Ci = -100,
     type = "header",
-    label = "Source"
+    label = "Source",
+    exclude = FALSE
   )
   getEstimate <- function(approximation) {
     ci <- suppressMessages(computeConfidenceInterval(
@@ -40,9 +42,19 @@ plotForest <- function(data,
   d2 <- bind_rows(d2) |>
     mutate(label = labels)
 
+  if (is.null(exclude)) {
+    d2 <- d2 |>
+      mutate(exclude = FALSE)
+    filteredData <- data
+  } else {
+    d2 <- d2 |>
+      mutate(exclude = !!exclude)
+    filteredData <- data[!exclude, ]
+  }
+
   d3 <- tibble()
   if (showFixedEffects || showRandomEffects) {
-    ma <- summary(meta::metagen(data$logRr, data$seLogRr, prediction = TRUE, level.ci = 1 - alpha))
+    ma <- summary(meta::metagen(filteredData$logRr, filteredData$seLogRr, prediction = TRUE, level.ci = 1 - alpha))
     if (showFixedEffects) {
       d3 <- bind_rows(
         d3,
@@ -51,7 +63,8 @@ plotForest <- function(data,
           logLb95Ci = ma$lower.fixed,
           logUb95Ci = ma$upper.fixed,
           type = "ma",
-          label = "Fixed effects"
+          label = "Fixed effects",
+          exclude = FALSE
         )
       )
     }
@@ -63,13 +76,14 @@ plotForest <- function(data,
           logLb95Ci = c(ma$lower.random, NA),
           logUb95Ci = c(ma$upper.random, NA),
           type = c("ma", "maSub"),
-          label = c("Random effects", sprintf("\u03C4 = %.2f (%.2f - %.2f)", ma$tau, ma$lower.tau, ma$upper.tau))
+          label = c("Random effects", sprintf("\u03C4 = %.2f (%.2f - %.2f)", ma$tau, ma$lower.tau, ma$upper.tau)),
+          exclude = FALSE
         )
       )
     }
   }
   if (showBayesianRandomEffects) {
-    estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(data, alpha = alpha)
+    estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(filteredData, alpha = alpha)
     d3 <- bind_rows(
       d3,
       tibble(
@@ -77,7 +91,8 @@ plotForest <- function(data,
         logLb95Ci = c(estimate$mu95Lb, NA),
         logUb95Ci = c(estimate$mu95Ub, NA),
         type = c("ma", "maSub"),
-        label = c("Bayesian random effects", sprintf("\u03C4 = %.2f (%.2f - %.2f)", estimate$tau, estimate$tau95Lb, estimate$tau95Ub))
+        label = c("Bayesian random effects", sprintf("\u03C4 = %.2f (%.2f - %.2f)", estimate$tau, estimate$tau95Lb, estimate$tau95Ub)),
+        exclude = FALSE
       )
     )
   }
@@ -96,7 +111,8 @@ plotForest <- function(data,
         logLb95Ci = predictionInterval[1],
         logUb95Ci = predictionInterval[2],
         type = "pi",
-        label = "Prediction interval"
+        label = "Prediction interval",
+        exclude = FALSE
       )
     )
   }
@@ -133,13 +149,10 @@ plotForest <- function(data,
     geom_segment(aes(x = x, y = y, xend = x, yend = yend), color = "#AAAAAA",  size = 0.2, data = data.frame(x = breaks, y = 0, yend = max(d$y) - 0.5)) +
     geom_segment(aes(x = x, y = y, xend = x, yend = yend), size = 0.5, data = data.frame(x = 1, y = 0, yend = max(d$y) - 0.5)) +
     geom_hline(aes(yintercept = max(d$y) - 0.5)) +
-    geom_errorbarh(aes(
-      xmin = exp(logLb95Ci),
-      xmax = exp(logUb95Ci)
-    ), height = 0.15) +
-    geom_point(size = 3, shape = 16, aes(fill = type)) +
+    geom_errorbarh(aes(xmin = exp(logLb95Ci), xmax = exp(logUb95Ci), color = exclude), height = 0.15) +
+    geom_point(size = 3, shape = 16, aes(color = exclude)) +
     geom_polygon(aes(x = x, y = y, group = group), data = diamondData) +
-    scale_fill_manual(values = c("#000000", "#000000", "#FFFFFF", "#FFFFFF", "#FFFFFF", "#FFFFFF")) +
+    scale_color_manual(values = c("black", "#BBBBBB")) +
     scale_x_continuous(xLabel, trans = "log10", breaks = breaks, labels = breaks) +
     coord_cartesian(xlim = limits, ylim = yLimits) +
     theme(
@@ -155,7 +168,7 @@ plotForest <- function(data,
       axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, -0.19), "lines")
     )
-  # rightPlot
+   rightPlot
   d$logLb95Ci[is.infinite(d$logLb95Ci)] <- NA
   d$logUb95Ci[is.infinite(d$logUb95Ci)] <- NA
   d$logRr[exp(d$logRr) < limits[1] | exp(d$logRr) > limits[2]] <- NA
@@ -171,14 +184,16 @@ plotForest <- function(data,
     y = rep(d$y, 3),
     x = rep(c(1, 2, 2.2), each = nrow(d)),
     label = c(as.character(d$label), estimateLabels, intervalLabels),
-    fontface = rep(if_else(d$type %in% c("ma", "header", "pi"), "bold", "plain"), 3)
+    fontface = rep(if_else(d$type %in% c("ma", "header", "pi"), "bold", "plain"), 3),
+    color = rep(if_else(d$exclude, "#BBBBBB", "black"), 3)
   )
   textTable$label[nrow(d) + 1] <- paste(xLabel, "(95% CI)")
   leftPlot <- ggplot(textTable, aes(x = x, y = y, label = label)) +
     geom_rect(xmin = -10, xmax = 10, ymin = 0, ymax = maBoundaryY, size = 0, fill = "#69AED5", alpha = 0.25, data = tibble(x = 1, y = 1, label = "NA")) +
-    geom_text(aes(fontface = fontface), size = 4, hjust = 0, vjust = 0.5) +
+    geom_text(aes(fontface = fontface, color = color), size = 4, hjust = 0, vjust = 0.5) +
     geom_hline(aes(yintercept = max(d$y) - 0.5)) +
     labs(x = "", y = "") +
+    scale_color_identity() +
     coord_cartesian(xlim = c(1, 2.75), ylim = yLimits) +
     theme(
       panel.grid.major = element_blank(),

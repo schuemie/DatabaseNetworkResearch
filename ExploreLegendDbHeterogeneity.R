@@ -7,6 +7,9 @@ library(ggplot2)
 library(ggh4x)
 
 # Fetch estimates from LEGEND T2DM -----------------------------------------------------------------
+legendLabel <- "T2dm"
+minDatabases <- 9
+
 connectionDetails <- createConnectionDetails(
   dbms = "postgresql",
   server = paste(keyring::key_get("ohdsiPostgresServer"),
@@ -63,12 +66,12 @@ estimates <- estimates |>
          outcomeName = as.factor(gsub("_", " ", gsub("outcome/", "", outcomeName))),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
-legendLabel <- "T2dm"
-minDatabases <- 10
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 
 # Fetch estimates from LEGEND Hypertension ---------------------------------------------------------
+legendLabel <- "Htn"
+minDatabases <- 6
 connectionDetails <- createConnectionDetails(
   dbms = "postgresql",
   server = paste(keyring::key_get("ohdsiPostgresServer"),
@@ -136,8 +139,7 @@ estimates <- estimates |>
          outcomeName = as.factor(outcomeName),
          negativeControl = outcomeId %in% negativeControlIds)
 disconnect(connection)
-legendLabel <- "Htn"
-minDatabases <- 6
+
 saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 
@@ -248,9 +250,9 @@ INNER JOIN @schema.database_meta_data
 WHERE se_log_rr IS NOT NULL;
 "
 estimates <- renderTranslateQuerySql(connection = connection,
-                                       sql = sql,
-                                       schema = schema,
-                                       snakeCaseToCamelCase = TRUE)
+                                     sql = sql,
+                                     schema = schema,
+                                     snakeCaseToCamelCase = TRUE)
 estimates <- estimates |>
   mutate(databaseId = as.factor(databaseId),
          targetName = as.factor(gsub("and ", "with ", gsub("New user of |with prior T2DM |treatment ", "", targetName))),
@@ -266,6 +268,14 @@ saveRDS(estimates, sprintf("estimates_%s.rds", legendLabel))
 
 # Compute tau --------------------------------------------------------------------------------------
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel))) {
+  analysisName <- unique(estimates$analysisName)
+  analysisName <- analysisName[grepl("match", analysisName)]
+  diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
+  estimates <- estimates |>
+    left_join(diagnostics |>
+                mutate(analysisName = !! analysisName))
+}
 
 atLeastNdbs <- estimates |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
@@ -288,8 +298,36 @@ computeTau <- function(group) {
   maEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
   traces <- attr(maEstimate, "traces")
   tauSample <- sample(traces[, 2], 100)
+
+  if (all(!is.na(group$unblind))) {
+    unblindedGroup <- group |>
+      filter(unblind)
+    if (nrow(unblindedGroup) == 0) {
+      maEstimateUnblinded <- tibble(
+        tauUnblinded = as.numeric(NA),
+        tau95LbUnblinded = as.numeric(NA),
+        tau95UbUnblinded = as.numeric(NA)
+      )
+      tauSampleUnblinded <- NULL
+    } else {
+      maEstimateUnblinded <- EvidenceSynthesis::computeBayesianMetaAnalysis(unblindedGroup, showProgressBar = FALSE) |>
+        select(tauUnblinded = tau,
+               tau95LbUnblinded = tau95Lb,
+               tau95UbUnblinded = tau95Ub)
+      traces <- attr(maEstimateUnblinded, "traces")
+      tauSampleUnblinded <- sample(traces[, 2], 100)
+    }
+  } else {
+    maEstimateUnblinded <- tibble(
+      tauUnblinded = as.numeric(NA),
+      tau95LbUnblinded = as.numeric(NA),
+      tau95UbUnblinded = as.numeric(NA)
+    )
+    tauSampleUnblinded <- NULL
+  }
   row <- maEstimate |>
     select(mu, mu95Lb, mu95Ub, tau, tau95Lb, tau95Ub) |>
+    bind_cols(maEstimateUnblinded) |>
     bind_cols(keyRow) |>
     mutate(signficant = mu95Lb > 0 | mu95Ub < 0) |>
     mutate(type = if_else(negativeControl,
@@ -297,7 +335,8 @@ computeTau <- function(group) {
                           if_else(signficant,
                                   "Outcome of interest and significant",
                                   "Outcome of interest")))
-  return(list(row = row, tauSample = tauSample))
+
+  return(list(row = row, tauSample = tauSample, tauSampleUnblinded = tauSampleUnblinded))
 }
 
 cluster <- ParallelLogger::makeCluster(10)
@@ -323,6 +362,21 @@ for (i in seq_len(nrow(groups))) {
     tauSample <- sample(tauSample, 10000)
   }
   tauSamples[[sprintf("%s-%s", row$analysisName, row$type)]] <- tauSample
+
+  fun2 <- function(x) {
+    if (x$row$analysisName == row$analysisName && x$row$type == row$type) {
+      return(x$tauSampleUnblinded)
+    } else {
+      return(c())
+    }
+  }
+  tauSampleUnblinded <- do.call(c, lapply(tauRowsAndSamples, fun2))
+  if (!is.null(tauSamplesUnblinded)) {
+    if (length(tauSampleUnblinded) > 10000) {
+      tauSampleUnblinded <- sample(tauSampleUnblinded, 10000)
+    }
+    tauSamples[[sprintf("%s-%s-Unblinded", row$analysisName, row$type)]] <- tauSampleUnblinded
+  }
 }
 
 saveRDS(taus, sprintf("taus_%s.rds", legendLabel))
@@ -379,11 +433,16 @@ priorData <- tibble(
 
 vizData <- list()
 for (i in seq_along(tauSamples)) {
-  row <- strsplit(names(tauSamples[i]), "-")[[1]]
-  names(row) <- c("analysisName", "type")
+  row <- strsplit(names(tauSamples)[i], "-")[[1]]
+  if (length(row) == 2) {
+    row[3] <- FALSE
+  }
+  names(row) <- c("analysisName", "type", "unblinded")
+
   row <- as_tibble(t(row)) |>
     mutate(type = gsub(" and", "\nand", type),
-           analysisName = if_else(analysisName == "unadjusted", "Unadjusted", analysisName))
+           analysisName = if_else(analysisName == "unadjusted", "Unadjusted", analysisName),
+           unblinded = if_else(unblinded == "Unblinded", "Unblinded\nonly", "All"))
   vizData[[i]] <- bind_cols(row, tibble(tau = tauSamples[[i]]))
 }
 vizData <- bind_rows(vizData)
@@ -394,11 +453,11 @@ ggplot(vizData, aes(x = tau)) +
   scale_y_continuous("Density") +
   scale_linetype_manual(values = c("dashed", "dotted")) +
   coord_cartesian(xlim = c(0,1)) +
-  facet_grid(analysisName ~ type)
-ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 6, height = 5)
+  facet_nested(analysisName ~ type + unblinded)
+ggsave(sprintf("TauPosteriors_%s.png", legendLabel), width = 8, height = 5)
 # ggsave(sprintf("TauPosteriorsCalibrated_%s.png", legendLabel), width = 6, height = 5)
 
-ggplot(vizData |> filter(analysisName == "PS matched", type == "Negative control"), aes(x = tau)) +
+ggplot(vizData |> filter(analysisName == "PS matched", type == "Negative control", unblinded == "All"), aes(x = tau)) +
   geom_density(fill = "#336B91", alpha = 0.75) +
   geom_line(aes(y = y, linetype = `Half-normal`), data = priorData) +
   scale_x_continuous("Tau") +
@@ -406,6 +465,27 @@ ggplot(vizData |> filter(analysisName == "PS matched", type == "Negative control
   scale_linetype_manual(values = c("dashed", "dotted")) +
   coord_cartesian(xlim = c(0,1))
 ggsave(sprintf("TauPosteriorsNcOnly_%s.svg", legendLabel), width = 6, height = 5)
+
+vizData2 <- vizData |>
+  filter(grepl("match", analysisName),
+         type %in% c("Negative control", "Outcome of interest\nand significant"),
+         unblinded != "All") |>
+  mutate(type = factor(type, levels = c("Negative control",
+                                        "Outcome of interest\nand significant",
+                                        "Outcome of interest\nnot significant")))
+ggplot(vizData2, aes(x = tau, group = type, fill = type)) +
+  geom_density(alpha = 0.5) +
+  scale_x_continuous("\u03C4") +
+  scale_y_continuous("Density") +
+  scale_fill_manual(values = c("#EB6622", "#336B91", "#11A08A")) +
+  coord_cartesian(xlim = c(0, 0.5)) +
+  theme(
+    legend.position = "top",
+    legend.title = element_blank()
+  )
+ggsave(sprintf("TauPosteriorsOverlay_%s.png", legendLabel), width = 4, height = 4)
+
+
 
 
 # Compute correlation matrix between databases using Bayesian model --------------------------------
@@ -660,40 +740,46 @@ saveRDS(tauSamples, sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 # Explore individual TCO examples ------------------------------------------------------------------
 source("ForestPlot.R")
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+analysisName <- unique(estimates$analysisName)
+analysisName <- analysisName[grepl("match", analysisName)]
+estimates <- estimates |>
+  filter(analysisName == !!analysisName)
 
-analysisName <- unique(estimates$analysisName)[2]
-analysisName
-
-negativeControls <- TRUE
+if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel)) && grepl("match", analysisName)) {
+  diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
+  estimates <- estimates |>
+    left_join(diagnostics)
+}
 
 atLeastNdbs <- estimates |>
-  filter(negativeControl == !!negativeControls, analysisName == !!analysisName) |>
   group_by(targetId, comparatorId, outcomeId) |>
   summarise(nDatabases = n(), .groups = "drop") |>
   filter(nDatabases >= minDatabases)
 
-hasJmdc <- estimates |>
-  filter(negativeControl == !!negativeControls, analysisName == !!analysisName, databaseId == "JMDC") |>
-  distinct(targetId, comparatorId, outcomeId)
-
 highPowerTcos <- estimates |>
-  filter(analysisName == !!analysisName) |>
   inner_join(
     atLeastNdbs,
     by = join_by(targetId, comparatorId, outcomeId)
   ) |>
-  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName, negativeControl) |>
   summarise(maxSeLogRr = max(seLogRr), .groups = "drop") |>
   arrange(maxSeLogRr)
 if ("JMDC" %in% estimates$databaseId) {
+  hasJmdc <- estimates |>
+    filter(analysisName == !!analysisName, databaseId == "JMDC") |>
+    distinct(targetId, comparatorId, outcomeId)
   highPowerTcos <- highPowerTcos |>
     inner_join(hasJmdc)
 }
+
 highPowerTcos
 
-
-
+# Individual examples
 example <- highPowerTcos[35, ]
+example <- highPowerTcos |>
+  filter(targetId == 102100000, comparatorId == 402100000, outcomeId == 6)
+example <- highPowerTcos |>
+  filter(targetId == 1, comparatorId == 2, outcomeId == 2)
 example
 dbGroupings <- tibble(
   databaseId = c("CCAE", "CUIMC", "Germany_DA", "MDCD", "MDCR", "OptumDod", "OptumEHR", "SIDIAP", "UK_IMRD", "US_Open_Claims", "VA-OMOP", "CUMC", "IMSG", "JMDC", "NHIS_NSC", "Optum", "Panther"),
@@ -702,11 +788,13 @@ dbGroupings <- tibble(
 )
 exampleEstimates <- estimates |>
   filter(analysisName == !!analysisName) |>
-  inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName)) |>
+  inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName, negativeControl)) |>
   inner_join(dbGroupings, by = join_by(databaseId)) |>
   arrange(databaseId)
+
 plotForest(data = exampleEstimates,
            labels = exampleEstimates$databaseId,
+           exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
            fileName = "Symposium/exampleTco.png")
@@ -714,6 +802,7 @@ plotForest(data = exampleEstimates,
 subset <- filter(exampleEstimates, type == "EHR")
 plotForest(data = subset,
            labels = subset$databaseId,
+           exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
            fileName = "Symposium/exampleTco_EHRs.png")
@@ -721,6 +810,7 @@ plotForest(data = subset,
 subset <- filter(exampleEstimates, type == "Claims")
 plotForest(data = subset,
            labels = subset$databaseId,
+           exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
            fileName = "Symposium/exampleTco_Claims.png")
@@ -728,13 +818,10 @@ plotForest(data = subset,
 subset <- filter(exampleEstimates, country == "USA")
 plotForest(data = subset,
            labels = subset$databaseId,
+           exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
            fileName = "Symposium/exampleTco_USA.png")
-
-
-
-# writeLines(paste(unique(estimates$databaseId), collapse = '", "'))
 
 # Picking example for symposium:
 outcomesOfInterest <- c("Acute myocardial infarction",
@@ -761,10 +848,14 @@ for (i in seq_len(nrow(examples))) {
     arrange(databaseId)
   plotForest(data = exampleEstimates,
              labels = exampleEstimates$databaseId,
+             exclude = !exampleEstimates$unblind,
              showFixedEffects = FALSE,
              showRandomEffects = FALSE,
              title = sprintf("%s vs %s\n%s", example$targetName, example$comparatorName, example$outcomeName),
              fileName = sprintf("Symposium/Patrick/Forest_t%d_c_%d_o%d_%s.png", example$targetId, example$comparatorId, example$outcomeId, legendLabel))
 
 }
+
+estimates |> group_by(databaseId) |> summarise(mean(unblind))
+subset <- estimates |> filter(databaseId == "CUMC")
 
