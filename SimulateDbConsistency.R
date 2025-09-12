@@ -752,3 +752,96 @@ maTarget <- computeBayesianMetaAnalysis(data)
 ma
 maTarget
 
+# Simulate single database required power ----------------------------------------------------------
+source("PredictionInterval.R")
+library(dplyr)
+library(ggplot2)
+library(survival)
+
+results <- list()
+# prior = 0.33; effectSize = 1.25; seLogRr = 0.1
+for (prior in c(0.33, 0.50, 1.00)) {
+  for (effectSize in c(1.25, 1.50, 2, 4, 8)) {
+    for (seLogRr in c(0.1, 0.25, 0.5, 0.75, 1)) {
+      writeLines(sprintf("Computing for prior %s, effect size %s, SE %s", prior, effectSize, seLogRr))
+      logRr = log(effectSize)
+      data <- tibble(
+        logRr = logRr,
+        seLogRr = seLogRr
+      )
+      estimate <- suppressMessages(EvidenceSynthesis::computeBayesianMetaAnalysis(
+        data,
+        priorSd = c(2, prior),
+        showProgressBar = FALSE))
+      predictionInterval <- computePredictionInterval(estimate)
+      row <- tibble(
+        prior = prior,
+        effectSize = effectSize,
+        seLogRr = seLogRr,
+        lb = exp(logRr + qnorm(0.025) * seLogRr),
+        ub = exp(logRr + qnorm(0.975) * seLogRr),
+        muLb = exp(estimate$mu95Lb),
+        muUb = exp(estimate$mu95Ub),
+        piLb = exp(predictionInterval[1]),
+        piUb = exp(predictionInterval[2])
+      )
+      results[[length(results) + 1]] <- row
+    }
+  }
+}
+results <- bind_rows(results)
+
+yBreaks <- sort(unique(results$seLogRr))
+yLabels <- sprintf("%0.2f", yBreaks)
+pTarget <- 0.5 # Equally-sized target and comparator cohorts
+ySecondLabels <- round(1 / (yBreaks^2 * pTarget * (1 - pTarget)))
+yData <- tibble(
+  seLogRr = yBreaks,
+  yLabels = yLabels,
+  ySecondLabels = ySecondLabels,
+  y = seq_along(yBreaks)
+)
+
+vizData <- results |>
+  filter(seLogRr < 1) |>
+  mutate(status = factor(
+    case_when(piLb > 1 ~ "Prediction interval LB > 1",
+              muLb > 1 ~ "Meta-analysis estimate LB > 1",
+              lb > 1 ~ "Database estimate LB > 1",
+              TRUE ~ "Non-significant"),
+    levels = c("Non-significant",
+               "Database estimate LB > 1",
+               "Meta-analysis estimate LB > 1",
+               "Prediction interval LB > 1")
+  ),
+  label = sprintf("(%0.2f-%0.2f)", lb, ub),
+  effectSize = as.factor(sprintf("%0.2f", effectSize)),
+  prior = sprintf("\u03C4 prior SD = %0.2f", prior)) |>
+  inner_join(yData, by = join_by(seLogRr))
+
+
+ggplot(vizData, aes(x = effectSize, y = y)) +
+  geom_tile(aes(fill = status), alpha = 0.75) +
+  geom_text(aes(label = label), size = 2.5) +
+  scale_fill_manual(values = c("#69AED5", "#336B91", "#11A08A", "#EB6622")) +
+  scale_x_discrete("Estimated hazard ratio",
+                   expand = c(0,0)) +
+  scale_y_continuous("Standard error",
+                     breaks = yData$y,
+                     labels = yData$yLabels,
+                     expand = c(0,0),
+                     sec.axis = sec_axis(~  .,
+                                         breaks = yData$y,
+                                         labels = yData$ySecondLabels,
+                                         name = "Observed cases (assuming equally-sized cohorts)")
+  ) +
+  facet_wrap(vars(prior), nrow = 3) +
+  theme(
+    legend.position = "right",
+    legend.title = element_blank(),
+    panel.background = element_blank(),
+    panel.spacing = unit(1, "lines"),
+    strip.background = element_blank()
+  )
+ggsave("RequiredPowerAndEffectSize.png", width = 7, height = 5, dpi = 300)
+

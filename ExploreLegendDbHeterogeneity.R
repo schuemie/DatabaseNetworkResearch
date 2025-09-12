@@ -737,6 +737,89 @@ saveRDS(tauSamples, sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 # median(tauSamples[[1]])
 # tauSamples <- readRDS(sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 
+# Counting single-database significance ------------------------------------------------------------
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
+analysisName <- unique(estimates$analysisName)
+analysisName <- analysisName[grepl("match", analysisName)]
+estimates <- estimates |>
+  filter(analysisName == !!analysisName)
+if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel)) && grepl("match", analysisName)) {
+  diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
+  estimates <- estimates |>
+    left_join(diagnostics)
+}
+atLeastNdbs <- estimates |>
+  filter(!negativeControl) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId) |>
+  summarise(nDatabases = n(), .groups = "drop") |>
+  filter(nDatabases >= minDatabases)
+groups <- estimates |>
+  inner_join(
+    atLeastNdbs,
+    by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId)
+  ) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId)|>
+  group_split()
+
+# group = groups[[1]]
+computeStatistics <- function(group) {
+  estimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
+  predictionInterval <- computePredictionInterval(estimate)
+  group <- group |>
+    mutate(lb = logRr + qnorm(0.025) * seLogRr,
+           ub = logRr + qnorm(0.975) * seLogRr)
+  row <- group |>
+    head(1) |>
+    select(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName) |>
+    mutate(
+      nDatabases = nrow(group),
+      nSignificantPositive = sum(group$lb > 0),
+      nSignificantNegative = sum(group$ub < 0),
+      muLb = estimate$mu95Lb,
+      muUb = estimate$mu95Ub,
+      piLb = predictionInterval[1],
+      piUb = predictionInterval[2]
+    )
+  return(row)
+}
+
+cluster <- ParallelLogger::makeCluster(10)
+ParallelLogger::clusterRequire(cluster, "dplyr")
+snow::clusterExport(cluster, "computePredictionInterval")
+rows <- ParallelLogger::clusterApply(cluster, groups, computeStatistics)
+ParallelLogger::stopCluster(cluster)
+rows <- bind_rows(rows)
+
+tableData <- rows |>
+  mutate(
+    metaAnalysis = case_when(
+      piLb > 0 ~ "PI and MA positive",
+      piLb < 0 & muLb > 0 ~ "MA positive",
+      piUb < 0 ~ "PI and MA negative",
+      piUb > 0 & muUb < 0 ~ "MA negative",
+      muLb <= 0 & muUb >= 0 ~ "MA non-significant"
+    ),
+    databasesPositive = case_when(
+      nSignificantPositive == 0 ~ "no DB positive",
+      nSignificantPositive == 1 ~ "1 DB positive",
+      nSignificantPositive >= 2 ~ ">=2 DB positive"
+    ),
+    databasesNegative = case_when(
+      nSignificantNegative == 0 ~ "no DB negative",
+      nSignificantNegative == 1 ~ "1 DB negative",
+      nSignificantNegative >= 2 ~ ">=2 DB negative"
+    )
+  )
+tableData <- tableData |>
+  group_by(metaAnalysis, databasesPositive, databasesNegative) |>
+  summarise(tcoCount = n(), .groups = "drop") |>
+  arrange(metaAnalysis, databasesPositive, databasesNegative)
+
+readr::write_csv(tableData, sprintf("SignificantDbCounts_%s.csv", legendLabel))
+
+
+
 # Explore individual TCO examples ------------------------------------------------------------------
 source("ForestPlot.R")
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
@@ -773,19 +856,17 @@ if ("JMDC" %in% estimates$databaseId) {
 }
 
 highPowerTcos
-
-# Individual examples
-example <- highPowerTcos[35, ]
-example <- highPowerTcos |>
-  filter(targetId == 102100000, comparatorId == 402100000, outcomeId == 6)
-example <- highPowerTcos |>
-  filter(targetId == 1, comparatorId == 2, outcomeId == 2)
-example
 dbGroupings <- tibble(
   databaseId = c("CCAE", "CUIMC", "Germany_DA", "MDCD", "MDCR", "OptumDod", "OptumEHR", "SIDIAP", "UK_IMRD", "US_Open_Claims", "VA-OMOP", "CUMC", "IMSG", "JMDC", "NHIS_NSC", "Optum", "Panther"),
   country = c("USA", "USA", "Germany", "USA", "USA", "USA", "USA", "Spain", "UK", "USA", "USA", "USA", "Germany", "Japan", "South Korea", "USA", "USA"),
   type = c("Claims", "EHR", "EHR", "Claims", "Claims", "Claims", "EHR", "SIDIAP", "EHR", "Claims", "EHR", "EHR", "EHR", "Claims", "Claims", "Claims", "EHR"),
 )
+
+# Individual example 1
+example <- highPowerTcos |>
+  filter(targetId == 5, comparatorId == 4, outcomeId == 2)
+example
+
 exampleEstimates <- estimates |>
   filter(analysisName == !!analysisName) |>
   inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName, negativeControl)) |>
@@ -797,31 +878,39 @@ plotForest(data = exampleEstimates,
            exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/exampleTco.png")
+           fileName = "Symposium/example1.png")
 
-subset <- filter(exampleEstimates, type == "EHR")
+subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC"))
 plotForest(data = subset,
            labels = subset$databaseId,
-           exclude = !exampleEstimates$unblind,
+           exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/exampleTco_EHRs.png")
+           fileName = "Symposium/example1a.png")
 
-subset <- filter(exampleEstimates, type == "Claims")
+subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC"))
 plotForest(data = subset,
            labels = subset$databaseId,
-           exclude = !exampleEstimates$unblind,
+           exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/exampleTco_Claims.png")
+           fileName = "Symposium/example1b.png")
 
-subset <- filter(exampleEstimates, country == "USA")
+subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC", "Panther"))
 plotForest(data = subset,
            labels = subset$databaseId,
-           exclude = !exampleEstimates$unblind,
+           exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/exampleTco_USA.png")
+           fileName = "Symposium/example1c.png")
+
+subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC", "Panther", "MDCR"))
+plotForest(data = subset,
+           labels = subset$databaseId,
+           exclude = !subset$unblind,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/example1d.png")
 
 # Picking example for symposium:
 outcomesOfInterest <- c("Acute myocardial infarction",

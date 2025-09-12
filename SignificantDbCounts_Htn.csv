@@ -1,0 +1,21 @@
+metaAnalysis,databasesPositive,databasesNegative,tcoCount
+MA negative,1 DB positive,>=2 DB negative,3
+MA negative,no DB positive,1 DB negative,10
+MA negative,no DB positive,>=2 DB negative,117
+MA negative,no DB positive,no DB negative,1
+MA non-significant,1 DB positive,1 DB negative,43
+MA non-significant,1 DB positive,>=2 DB negative,15
+MA non-significant,1 DB positive,no DB negative,214
+MA non-significant,>=2 DB positive,1 DB negative,17
+MA non-significant,>=2 DB positive,>=2 DB negative,1
+MA non-significant,>=2 DB positive,no DB negative,108
+MA non-significant,no DB positive,1 DB negative,166
+MA non-significant,no DB positive,>=2 DB negative,79
+MA non-significant,no DB positive,no DB negative,365
+MA positive,1 DB positive,no DB negative,21
+MA positive,>=2 DB positive,1 DB negative,3
+MA positive,>=2 DB positive,no DB negative,168
+MA positive,no DB positive,no DB negative,1
+PI and MA negative,no DB positive,>=2 DB negative,45
+PI and MA positive,>=2 DB positive,1 DB negative,1
+PI and MA positive,>=2 DB positive,no DB negative,61
