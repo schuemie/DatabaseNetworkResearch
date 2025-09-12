@@ -252,6 +252,7 @@ wideDf <- vectors |>
     id_cols = c(databaseId, type),
     names_from = covariateId,
     values_from = covariateValue,
+    values_fn = ~first(.x),
     values_fill = list(covariateValue = 0)
   )
 
