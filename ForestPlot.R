@@ -16,6 +16,7 @@ plotForest <- function(data,
                        showRandomEffects = TRUE,
                        showBayesianRandomEffects = TRUE,
                        showPredictionInterval = TRUE,
+                       showEstimatesText = TRUE,
                        title = NULL,
                        fileName = NULL) {
   d1 <- data.frame(
@@ -117,10 +118,68 @@ plotForest <- function(data,
     )
   }
   d <- rbind(d1, d2, d3)
+  .plotForestFromDataFrame(d, fileName, xLabel, limits, showEstimatesText, title)
+}
+
+plotForestGivenEstimates <- function(perSiteEstimates,
+                                     labels = paste("Site", seq_len(nrow(data))),
+                                     maEstimate,
+                                     maLabel = "Bayesian random effects",
+                                     tau,
+                                     tauLb,
+                                     tauUb,
+                                     predictionInterval = NULL,
+                                     xLabel = "Hazard Ratio",
+                                     limits = c(0.1, 10),
+                                     alpha = 0.05,
+                                     showEstimatesText = TRUE,
+                                     title = NULL,
+                                     fileName = NULL) {
+  d1 <- data.frame(
+    logRr = -100,
+    logLb95Ci = -100,
+    logUb95Ci = -100,
+    type = "header",
+    label = "Source",
+    exclude = FALSE
+  )
+  d2 <- data.frame(
+    logRr = log(perSiteEstimates$rr),
+    logLb95Ci = log(perSiteEstimates$lb),
+    logUb95Ci = log(perSiteEstimates$ub),
+    type = "db",
+    label = labels,
+    exclude = FALSE
+  )
+  d3 <- data.frame(
+    logRr = c(log(maEstimate$rr), NA),
+    logLb95Ci = c(log(maEstimate$lb), NA),
+    logUb95Ci = c(log(maEstimate$ub), NA),
+    type = c("ma", "maSub"),
+    label = c(maLabel, sprintf("\u03C4 = %.2f (%.2f - %.2f)", tau, tauLb, tauUb)),
+    exclude = c(FALSE, FALSE)
+  )
+  d4 <- data.frame(
+    logRr = NA,
+    logLb95Ci = predictionInterval[1],
+    logUb95Ci = predictionInterval[2],
+    type = "pi",
+    label = "Prediction interval",
+    exclude = FALSE
+  )
+  d <- rbind(d1, d2, d3, d4)
+  .plotForestFromDataFrame(d, fileName, xLabel, limits, showEstimatesText, title)
+}
+
+
+.plotForestFromDataFrame <- function(d, fileName, xLabel, limits, showEstimatesText, title) {
+  if (!showEstimatesText) {
+    d <- d |>
+      filter(type != "maSub")
+  }
   d <- d |>
     mutate(y = if_else(type == "maSub", 0.5, 1)) |>
     mutate(y = sum(y) - cumsum(y) + 1)
-
   maEstimates <- d |>
     filter(type == "ma", !is.na(logRr))
   diamondData <- tibble(
@@ -168,7 +227,7 @@ plotForest <- function(data,
       axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, -0.19), "lines")
     )
-   rightPlot
+  rightPlot
   d$logLb95Ci[is.infinite(d$logLb95Ci)] <- NA
   d$logUb95Ci[is.infinite(d$logUb95Ci)] <- NA
   d$logRr[exp(d$logRr) < limits[1] | exp(d$logRr) > limits[2]] <- NA
@@ -188,13 +247,25 @@ plotForest <- function(data,
     color = rep(if_else(d$exclude, "#BBBBBB", "black"), 3)
   )
   textTable$label[nrow(d) + 1] <- paste(xLabel, "(95% CI)")
+  if (!showEstimatesText) {
+    textTable <- textTable |>
+      filter(x == 1)
+    xLimits <- c(1, 1.75)
+    widths <- c(0.9, 1)
+    width <- 4.5
+  } else {
+    xLimits <- c(1, 2.75)
+    widths <- c(1.5, 1)
+    width <- 7
+
+  }
   leftPlot <- ggplot(textTable, aes(x = x, y = y, label = label)) +
     geom_rect(xmin = -10, xmax = 10, ymin = 0, ymax = maBoundaryY, size = 0, fill = "#69AED5", alpha = 0.25, data = tibble(x = 1, y = 1, label = "NA")) +
     geom_text(aes(fontface = fontface, color = color), size = 4, hjust = 0, vjust = 0.5) +
     geom_hline(aes(yintercept = max(d$y) - 0.5)) +
     labs(x = "", y = "") +
     scale_color_identity() +
-    coord_cartesian(xlim = c(1, 2.75), ylim = yLimits) +
+    coord_cartesian(xlim = xLimits, ylim = yLimits) +
     theme(
       panel.grid.major = element_blank(),
       panel.grid.minor = element_blank(),
@@ -208,9 +279,9 @@ plotForest <- function(data,
       axis.line.x.bottom = element_line(),
       plot.margin = grid::unit(c(0, 0, 0, 0), "lines")
     )
-  plot <- gridExtra::grid.arrange(leftPlot, rightPlot, ncol = 2, widths = c(1.5, 1), padding = unit(0, "line"), top = title)
+  plot <- gridExtra::grid.arrange(leftPlot, rightPlot, ncol = 2, widths = widths, padding = unit(0, "line"), top = title)
   if (!is.null(fileName)) {
-    ggsave(fileName, plot, width = 7, height = 1 + max(d$y) * 0.3, dpi = 300)
+    ggsave(fileName, plot, width = width, height = 1 + max(d$y) * 0.3, dpi = 300)
   }
   invisible(plot)
 }

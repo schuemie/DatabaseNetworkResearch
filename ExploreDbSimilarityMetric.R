@@ -278,6 +278,9 @@ fullMatrix <- results |>
 readr::write_csv(fullMatrix, file.path(outputFolder, "DatabaseCharacteristicsSimilarity.csv"))
 
 # Heat map with hierarchical clustering ----------------------------------------
+library(pheatmap)
+library(dplyr)
+fullMatrix <- readr::read_csv("/Users/schuemie/Library/CloudStorage/OneDrive-JNJ/home/Research/Reproducibility/DatabaseCharacteristicsSimilarityEviNet.csv")
 matrix <- as.matrix(fullMatrix |> select(-databaseId1))
 rownames(matrix) <- fullMatrix$databaseId1
 matrix = 1 - matrix # Turn similarity into distance
@@ -289,7 +292,11 @@ pheatmap(
   clustering_distance_rows = as.dist(matrix),
   clustering_distance_cols = as.dist(matrix),
   display_numbers = FALSE,    # show numbers if you want
-  treeheight_row = 50,        # height of row dendrogram
+  fontsize = 14,
+  width = 16,
+  height = 15,
+  treeheight_row = 120,        # height of row dendrogram
   treeheight_col = 50,         # height of col dendrogram
-  filename = file.path(outputFolder, "DatabaseCharacteristicsSimilarity.png")
+  filename = "/Users/schuemie/Library/CloudStorage/OneDrive-JNJ/home/Research/Reproducibility/DatabaseCharacteristicsSimilarityEviNet.png"
 )
+

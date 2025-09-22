@@ -503,26 +503,6 @@ ggsave("SimReplicationSignificantDifferent.png", width = 6.5, height = 4)
 library(dplyr)
 source("ForestPlot.R")
 
-library(EvidenceSynthesis)
-set.seed(123)
-populations <- simulatePopulations(createSimulationSettings(n = 20000))
-labels <- paste("Site", seq_along(populations))
-fitModelInDatabase <- function(population, type) {
-  cyclopsData <- Cyclops::createCyclopsData(Surv(time, y) ~ x + strata(stratumId),
-                                            data = population,
-                                            modelType = "cox"
-  )
-  cyclopsFit <- Cyclops::fitCyclopsModel(cyclopsData)
-  approximation <- approximateLikelihood(cyclopsFit, parameter = "x", approximation = type)
-  return(approximation)
-}
-approximations <- lapply(populations, fitModelInDatabase, type = "grid with gradients")
-# approximations <- do.call("rbind", approximations)
-estimate <- computeBayesianMetaAnalysis(approximations)
-plot <- plotMetaAnalysisForest(approximations, labels, estimate, xLabel = "Hazard Ratio", showLikelihood = FALSE, fileName = "example1.svg")
-ggsave("example2.svg", plot = plot,  width = 7.5, height = 1 + 5 * 0.3)
-plotMetaAnalysisForest(approximations, labels, estimate, xLabel = "Hazard Ratio", fileName = "example3.svg")
-
 vizData <- tibble(
   x = 1:100,
   y = dnorm(1:100, 50, 12)
@@ -532,86 +512,170 @@ ggplot(vizData, aes(x = x, y = y)) +
   theme_void()
 ggsave("exampleNormal.svg", width = 7, height = 2)
 
+# Poll 1
+plot <- plotForest(data = tibble(logRr = c(log(1.8)),
+                                 seLogRr = c(0.2)),
+                   labels = c("Database A (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = FALSE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example1a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(2), log(1.85)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database B (US claims)", "Database C (US claims)", "Database D (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example1b.svg")
 
-data <- lapply(populations, fitModelInDatabase, type = "normal")
-plot <- plotForest(bind_rows(data))
-ggsave("example4.svg", plot, width = 8, height = 4)
+# Poll 2
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(2), log(1.85)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database B (US claims)", "Database C (US claims)", "Database D (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example2a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(2), log(1.85)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database E (US EHR)", "Database F (Dutch EHR)", "Database G (Korea Claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example2b.svg")
 
-data <- tibble(
-  logRr = c(2, 2.1, 0.15, -0.15),
-  seLogRr = c(0.04, 0.06, 0.08, 0.06)
+# Poll 3
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(2), log(1.85)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database E (US EHR)", "Database F (Dutch EHR)", "Database G (Korea Claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example3a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(1.01), log(0.5)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database H (US EHR)", "Database I (Dutch EHR)", "Database J (Korea Claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example3b.svg")
+
+# Poll 4
+plot <- plotForest(data = tibble(logRr = c(log(1.8)),
+                                 seLogRr = c(0.2)),
+                   labels = c("Database A (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = FALSE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example4a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(2.3)),
+                                 seLogRr = c(0.2)),
+                   labels = c("Database E (US EHR)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = FALSE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example4b.svg")
+
+# Poll 5
+plot <- plotForest(data = tibble(logRr = c(log(1.82)),
+                                 seLogRr = c(0.26)),
+                   labels = c("Database A (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = FALSE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example5a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(1.7), log(1.9), log(2), log(1.80)),
+                                 seLogRr = c(0.4, 0.5, 0.6, 0.35)),
+                   labels = c("Database A (US claims)", "Database B (US claims)", "Database C (US claims)", "Database D (US claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example5b.svg")
+
+# Poll 6
+dataA <- tibble(
+  logRr =   c(1.011, 1.075),
+  seLogRr = c(0.175, 0.402)
 )
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example5.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(0.9),
-  seLogRr = c(0.09)
+labelsA <- c("Database X (US claims)", "Database Y (US claims)")
+dataB <- tibble(
+  logRr =   c(0.877, 1.07, 1.05, 1.24),
+  seLogRr = c(0.526, 0.6, 0.608, 0.8)
 )
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example6.svg", plot, width = 8, height = 2.5)
+labelsB <- c("Database P (US claims)", "Database Q (US claims)", "Database R (US claims)", "Database S (US claims)")
 
+plot <- plotForest(data = dataA,
+                   labels = labelsA,
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example6a.svg")
+plot <- plotForest(data = dataB,
+                   labels = labelsB,
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example6b.svg")
+plot <- plotForest(data = dataA,
+                   labels = labelsA,
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = TRUE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example6c.svg")
+plot <- plotForest(data = dataB,
+                   labels = labelsB,
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = TRUE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example6d.svg")
 
-
-
-data <- tibble(
-  logRr = c(0.9, 1.1),
-  seLogRr = c(0.09, 0.11)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example1.svg", plot, width = 8, height = 3)
-
-
-data <- tibble(
-  logRr = c(0.9, 1.1, 1, 1.05),
-  seLogRr = c(0.09, 0.11, 0.3, 0.5)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example1b.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(0.9),
-  seLogRr = c(0.09)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example1c.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(.1, 1.5),
-  seLogRr = c(0.75, 0.08)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example2.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(0.4, 2),
-  seLogRr = c(0.03, 0.08)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example3.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(1, 1, 1, 1),
-  seLogRr = c(0.08, 0.6, 0.61, 0.62)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example4.svg", plot, width = 8, height = 3)
-
-data <- tibble(
-  logRr = c(2, 1, 0.15, -0.15),
-  seLogRr = c(0.04, 0.06, 0.81, 0.8)
-)
-plot <- plotForest(data)
-grid::grid.draw(plot)
-ggsave("example5.svg", plot, width = 8, height = 3)
+# Poll 7
+plot <- plotForest(data = tibble(logRr = c(log(1.8), log(2.3), log(2), log(1.85)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database E (US EHR)", "Database F (Dutch EHR)", "Database G (Korea Claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example7a.svg")
+plot <- plotForest(data = tibble(logRr = c(log(1), log(1.5), log(1.2), log(1.05)),
+                                 seLogRr = c(0.2, 0.2, 0.2, 0.2)),
+                   labels = c("Database A (US claims)", "Database H (US EHR)", "Database I (Dutch EHR)", "Database J (Korea Claims)"),
+                   showFixedEffects = FALSE,
+                   showRandomEffects = FALSE,
+                   showBayesianRandomEffects = TRUE,
+                   showPredictionInterval = FALSE,
+                   showEstimatesText = FALSE,
+                   fileName = "Symposium/example7b.svg")
 
 # Find cool example ---------------------------------------------
 library(EvidenceSynthesis)
@@ -630,6 +694,30 @@ piTarget <- computePredictionInterval(maTarget)
 maTarget
 piTarget
 
+nDatabases <- 2
+eachDbSignificant <- FALSE
+piSignificant <- TRUE
+
+# The main example from the poll:
+data = tibble(
+  logRr = c(log(1.81), log(2.25), log(2.05), log(1.85)),
+  seLogRr = c(0.23, 0.26, 0.225, 0.256)
+)
+plotForest(data, showFixedEffects = F, showRandomEffects = F)
+maTarget <- computeBayesianMetaAnalysis(data)
+piTarget <- computePredictionInterval(maTarget)
+maTarget
+piTarget
+
+data = tibble(
+  logRr = c(log(1.5), log(2.4), log(1.9), log(2.25)),
+  seLogRr = c(0.04, 0.05, 0.05, 0.05)
+)
+plotForest(data, showFixedEffects = F, showRandomEffects = F)
+
+nDatabases <- 4
+eachDbSignificant <- TRUE
+piSignificant <- FALSE
 
 # Constraints for corresponding example:
 # specified number of DBs
@@ -670,9 +758,6 @@ cost <- function(p, nDatabases, maTarget, eachDbSignificant, piSignificant) {
   return(cost)
 }
 
-nDatabases <- 2
-eachDbSignificant <- FALSE
-piSignificant <- TRUE
 
 # Use genetic algorithm to find a solution
 cluster <- parallel::makeCluster(10)

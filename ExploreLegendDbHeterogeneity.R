@@ -738,25 +738,29 @@ saveRDS(tauSamples, sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 # tauSamples <- readRDS(sprintf("tauSamplesCalibrated_%s.rds", legendLabel))
 
 # Counting single-database significance ------------------------------------------------------------
+source("PredictionInterval.R")
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
-analysisName <- unique(estimates$analysisName)
-analysisName <- analysisName[grepl("match", analysisName)]
+analysisName <-  unique(estimates$analysisName)[grep("match", unique(estimates$analysisName))]
 estimates <- estimates |>
   filter(analysisName == !!analysisName)
-if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel)) && grepl("match", analysisName)) {
+if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel))) {
   diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
   estimates <- estimates |>
-    left_join(diagnostics)
+    inner_join(diagnostics) |>
+    filter(unblind)
 }
-atLeastNdbs <- estimates |>
+estimates <- estimates |>
+  filter(targetId < comparatorId)
+
+atLeastTwoDbs <- estimates |>
   filter(!negativeControl) |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId) |>
   summarise(nDatabases = n(), .groups = "drop") |>
-  filter(nDatabases >= minDatabases)
+  filter(nDatabases >= 2)
 groups <- estimates |>
   inner_join(
-    atLeastNdbs,
+    atLeastTwoDbs,
     by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId)
   ) |>
   group_by(targetId, targetName, comparatorId, comparatorName, outcomeId)|>
@@ -791,26 +795,28 @@ rows <- ParallelLogger::clusterApply(cluster, groups, computeStatistics)
 ParallelLogger::stopCluster(cluster)
 rows <- bind_rows(rows)
 
+# Overall counts when restricting to prespecified number of databases:
 tableData <- rows |>
-  mutate(
-    metaAnalysis = case_when(
-      piLb > 0 ~ "PI and MA positive",
-      piLb < 0 & muLb > 0 ~ "MA positive",
-      piUb < 0 ~ "PI and MA negative",
-      piUb > 0 & muUb < 0 ~ "MA negative",
-      muLb <= 0 & muUb >= 0 ~ "MA non-significant"
-    ),
-    databasesPositive = case_when(
-      nSignificantPositive == 0 ~ "no DB positive",
-      nSignificantPositive == 1 ~ "1 DB positive",
-      nSignificantPositive >= 2 ~ ">=2 DB positive"
-    ),
-    databasesNegative = case_when(
-      nSignificantNegative == 0 ~ "no DB negative",
-      nSignificantNegative == 1 ~ "1 DB negative",
-      nSignificantNegative >= 2 ~ ">=2 DB negative"
-    )
+  filter(nDatabases >= minDatabases) |>
+mutate(
+  metaAnalysis = case_when(
+    piLb > 0 ~ "PI and MA positive",
+    piLb < 0 & muLb > 0 ~ "MA positive",
+    piUb < 0 ~ "PI and MA negative",
+    piUb > 0 & muUb < 0 ~ "MA negative",
+    muLb <= 0 & muUb >= 0 ~ "MA non-significant"
+  ),
+  databasesPositive = case_when(
+    nSignificantPositive == 0 ~ "no DB positive",
+    nSignificantPositive == 1 ~ "1 DB positive",
+    nSignificantPositive >= 2 ~ ">=2 DB positive"
+  ),
+  databasesNegative = case_when(
+    nSignificantNegative == 0 ~ "no DB negative",
+    nSignificantNegative == 1 ~ "1 DB negative",
+    nSignificantNegative >= 2 ~ ">=2 DB negative"
   )
+)
 tableData <- tableData |>
   group_by(metaAnalysis, databasesPositive, databasesNegative) |>
   summarise(tcoCount = n(), .groups = "drop") |>
@@ -818,7 +824,123 @@ tableData <- tableData |>
 
 readr::write_csv(tableData, sprintf("SignificantDbCounts_%s.csv", legendLabel))
 
+# Specific counts by total number of databases with estimates:
+vizData <- bind_rows(
+  rows |>
+    transmute(nDatabases,
+              metric = "Total TCOs",
+              value = 1),
+  rows |>
+    transmute(nDatabases,
+              metric = "Meta-analysis non-significant, >= 1 database significant",
+              value = (muLb <= 0 & muUb >= 0) & (nSignificantPositive > 0 | nSignificantNegative > 0)),
+  rows |>
+    transmute(nDatabases,
+              metric = "Meta-analysis significant, >= 1 database significant opposite",
+              value = (muLb > 0 & nSignificantNegative > 0) | (muUb < 0 & nSignificantPositive > 0)),
+  rows |>
+    transmute(nDatabases,
+              metric = "Meta-analysis significant, all databases non-significant",
+              value = (muLb > 0 | muUb < 0) & (nSignificantPositive == 0 & nSignificantNegative == 0)),
+  rows |>
+    transmute(nDatabases,
+              metric = ">= 1 database significant, >= 1 database significant opposite",
+              value = nSignificantPositive > 0 & nSignificantNegative > 0)
+) |>
+  group_by(nDatabases, metric) |>
+  summarise(value = sum(value), .groups = "drop")
 
+ggplot(vizData, aes(x = nDatabases, y = value, group = metric, color = metric)) +
+  geom_hline(yintercept = 0) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous("Number of databases with unblinded estimates") +
+  scale_y_continuous("Number of TCOs") +
+  theme(
+    legend.title = element_blank()
+  )
+ggsave(sprintf("SignificantDbStatistics_%s.png", legendLabel), width = 8, height = 4)
+readr::write_csv(vizData, sprintf("SignificantDbStatistics_%s.csv", legendLabel))
+
+# Combine 2 or more DBs:
+library(ggrepel)
+
+vizData1 <- rows |>
+  mutate(maSignificant = (muLb > 0) | (muUb < 0)) |>
+  mutate(level = 1,
+         type = case_when(
+           maSignificant ~ "Meta-analysis significant",
+           !maSignificant ~ "Meta-analysis non-significant"
+         )) |>
+  mutate(label = as.character(NA),
+         hide = FALSE)
+
+vizData2 <- vizData1 |>
+  mutate(atLeast1DbSignficant = nSignificantPositive > 0 | nSignificantNegative > 0) |>
+  mutate(level = 2,
+         type = case_when(
+           maSignificant & atLeast1DbSignficant ~ "Meta-analysis significant, >= 1 database significant",
+           maSignificant & !atLeast1DbSignficant ~ "Meta-analysis significant, All databases non-significant",
+           !maSignificant & atLeast1DbSignficant ~ "Meta-analysis non-significant, >= 1 database signficant",
+           !maSignificant & !atLeast1DbSignficant ~ "Meta-analysis non-significant, All databases non-significant",
+           TRUE ~ paste(type, "hide")
+         )) |>
+  mutate(label = gsub(".*, ", "", type),
+         hide = grepl("hide", label))
+
+vizData3 <- vizData2 |>
+  mutate(opposite = nSignificantPositive > 0 & nSignificantNegative > 0) |>
+  mutate(level = 3,
+         type = case_when(
+           # Too rare, makes plot looks weird:
+           # maSignificant & opposite ~ "Meta-analysis significant, >= 1 database signficant, >= 2 DBs significant opposite",
+           !maSignificant & opposite ~ "Meta-analysis non-significant, >= 1 database signficant, >= 2 DBs significant opposite",
+           TRUE ~ type
+         ))|>
+  mutate(label = gsub(".*, ", "", type),
+         hide = !grepl("opposite", label))
+
+
+vizData <- bind_rows(
+  vizData1,
+  vizData2,
+  vizData3
+) |>
+  group_by(level, type, label, hide) |>
+  summarise(count = n(), .groups = "drop") |>
+  group_by(level) |>
+  arrange(desc(type)) |>
+  mutate(percentage = sprintf("%0.1f%%", 100 *count / nrow(rows)),
+         totalCount = cumsum(count),
+         pos = totalCount - count / 2) |>
+  ungroup() |>
+  mutate(percentage = if_else(hide, NA, percentage),
+         label = if_else(hide, NA, label))
+
+ggplot(vizData, aes(x  = level, y = count, fill = type, alpha = hide)) +
+  geom_bar(stat="identity", width = 1, position = "stack") +
+  geom_hline(yintercept = vizData |> filter(level == 1) |> pull(totalCount)) +
+  geom_text(aes(label = percentage, y = pos)) +
+  geom_label_repel(aes(label = label, y = pos), size = 4, nudge_x = 2, fill = "white", alpha = 0.8) +
+  scale_alpha_manual(values = c(1, 0)) +
+  scale_fill_manual(values = c("#69AED5", "#a48caa", "#f579f6", "#97bed4", "#e15e59", "#e2928f", "#e2928f", "gray")) +
+  coord_radial("y", inner.radius = 0.1, expand = FALSE)  +
+  theme_void()  +
+  theme(legend.position = "none")
+ggsave(sprintf("SignificantSunburst_%s.svg", legendLabel), width = 6, height = 6)
+
+
+# Look at single examples
+examples <-  rows |>
+  filter((muLb <= 0 & muUb >= 0) & (nSignificantPositive > 0 | nSignificantNegative > 0))
+example <- examples[1, ]
+data <- estimates |>
+  inner_join(example, by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, outcomeName))
+plotForest(data = data,
+           labels = data$databaseId,
+           showFixedEffects = FALSE,
+           showRandomEffects = FALSE,
+           fileName = "Symposium/ExampleMaNonSignDbSign.svg")
 
 # Explore individual TCO examples ------------------------------------------------------------------
 source("ForestPlot.R")
