@@ -483,9 +483,7 @@ ggplot(vizData2, aes(x = tau, group = type, fill = type)) +
     legend.position = "top",
     legend.title = element_blank()
   )
-ggsave(sprintf("TauPosteriorsOverlay_%s.png", legendLabel), width = 4, height = 4)
-
-
+ggsave(sprintf("Symposium/TauPosteriorsOverlay_%s.svg", legendLabel), width = 4, height = 4)
 
 
 # Compute correlation matrix between databases using Bayesian model --------------------------------
@@ -500,8 +498,8 @@ nOutcomes <- 50
 trueMu1 <- 0.1  # True average log(RR) for Db1
 trueMu2 <- 0.15 # True average log(RR) for Db2
 trueSigma1 <- 0.3 # True standard deviation of log(RR) for Db1
-trueSigma2 <- 0.4 # True standard deviation of log(RR) for Db2
-trueRho <- 0.2   # This is the true correlation we want to recover
+trueSigma2 <- 0.25 # True standard deviation of log(RR) for Db2
+trueRho <- -0.2   # This is the true correlation we want to recover
 covMatrix <- matrix(c(trueSigma1^2, trueRho * trueSigma1 * trueSigma2,
                       trueRho * trueSigma1 * trueSigma2, trueSigma2^2),
                     nrow = 2)
@@ -529,6 +527,16 @@ print(head(dataLong))
 # Real data
 estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
 
+# powerPerOutcome <- estimates |>
+#   group_by(outcomeId, outcomeName, negativeControl) |>
+#   summarise(medianSe = median(seLogRr), .groups = "drop") |>
+#   arrange(medianSe)
+# readr::write_csv(powerPerOutcome, "PowerPerOutcome.csv")
+
+# Negative controls only:
+# estimates <- estimates |>
+#   filter(negativeControl)
+
 analysisName <- unique(estimates$analysisName)[1]
 analysisName
 
@@ -552,20 +560,23 @@ poweredDbs <- estimates  |>
   summarise(analysisCount = n()) |>
   filter(analysisCount == length(unique(estimates$analysisName)))
 
-atLeastNddbs <- estimates |>
+# poweredDbs <- estimates  |>
+#   filter(analysisName == !!analysisName) |>
+#   group_by(databaseId) |>
+#   summarise(medianSe = median(seLogRr), .groups = "drop") |>
+#   filter(medianSe < 0.81)
+
+dummyIds <- estimates |>
   filter(analysisName == !!analysisName) |>
-  group_by(targetId, comparatorId, outcomeId) |>
-  summarise(n = n(), .groups = "drop") |>
-  # filter(n >= minDatabases) |>
+  distinct(targetId, comparatorId, outcomeId) |>
   arrange(targetId, comparatorId, outcomeId) |>
   mutate(dummyOutcomeId = row_number())
 
 dataLong<- estimates |>
   filter(analysisName == !!analysisName) |>
-  inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
+  inner_join(dummyIds, by = join_by(targetId, comparatorId, outcomeId)) |>
   inner_join(poweredDbs, by = join_by(databaseId)) |>
   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
-
 
 # The formula now models logRr, accounting for measurement error via se(seLogRr).
 # - `0 + databaseId`: This estimates the average logRr for each databaseId (μ1, μ2) without a global intercept.
@@ -575,13 +586,15 @@ dataLong<- estimates |>
 #   This correlation is our parameter of interest, rho (ρ).
 modelFormula <- bf(logRr | se(seLogRr) ~ 0 + databaseId + (0 + databaseId | outcomeId))
 
+# brms::get_prior(modelFormula, dataLong)
+
 # Set weakly informative priors for the new model parameters.
 # 'b': The fixed effects (the average logRRs for each databaseId).
 # 'sd': The standard deviations of the outcome-specific effects (σ1, σ2).
 # 'cor': The correlation matrix for the outcome-specific effects (contains ρ).
 priors <- c(
   prior(normal(0, 2), class = "b"),
-  prior(exponential(1), class = "sd"),
+  prior(student_t(3, 0, 2.5) , class = "sd"),
   prior(lkj(1), class = "cor")
 )
 
@@ -598,7 +611,7 @@ correlationModelFit <- brm(
   control = list(adapt_delta = 0.95)
 )
 
-print(summary(correlationModelFit))
+summary(correlationModelFit)
 results <- summary(correlationModelFit)$random[[1]]
 results$name <- rownames(results)
 rownames(results) <- NULL
@@ -624,27 +637,162 @@ fullMatrix <- fullMatrix |>
 readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", analysisName), legendLabel))
 
 
+# Plot correlation between two databases
+correlation <- readr::read_csv( sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", "unadjusted"), legendLabel))
+breaks <- c(0.25, 0.5, 1, 2, 4)
+
+allDatabases <- c("CCAE", "MDCR", "OptumEHR", "Germany_DA")
+tcosToInclude <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  filter(databaseId %in% allDatabases) |>
+  group_by(targetId, comparatorId, outcomeId) |>
+  summarise(maxSe = max(seLogRr),
+            nDatabases = n()) |>
+  filter(maxSe < 0.4, nDatabases == length(allDatabases)) |>
+  mutate(Powered = "Yes")
+
+
+# database1 = "CCAE"; database2 = "MDCD"
+plotScatter <- function(database1, database2) {
+  vizData <- estimates |>
+    filter(analysisName == !!analysisName) |>
+    filter(databaseId %in% c(database1, database2)) |>
+    select(targetId, comparatorId, outcomeId, databaseId, logRr, seLogRr) |>
+    mutate(databaseId = if_else(databaseId == database1, 1, 2)) |>
+    pivot_wider(values_from = c(logRr, seLogRr), names_from = databaseId) |>
+    left_join(tcosToInclude, by = join_by(targetId, comparatorId, outcomeId)) |>
+    mutate(Powered = if_else(is.na(Powered), "No", Powered))
+  rho <- filter(correlation, databaseId1 == database1)[[database2]]
+  labelData <- tibble(
+    x = log(0.25),
+    y = log(4),
+    label = sprintf("Correlation = %0.2f", rho)
+  )
+  ggplot(vizData, aes(x = logRr_1, y = logRr_2)) +
+    # geom_abline(slope = rho) +
+    #geom_smooth(method = "lm",) +
+    geom_point(aes(size = Powered, alpha = Powered), shape = 16) +
+    geom_label(aes(x = x, y = y, label = label), hjust = 0, labelData) +
+    scale_size_manual(values = c(7, 1)) +
+    scale_alpha_manual(values = c(0.05, 0.9)) +
+    scale_x_continuous(paste("Hazard ratio", database1), breaks = log(breaks), labels = breaks) +
+    scale_y_continuous(paste("Hazard ratio", database2), breaks = log(breaks), labels = breaks) +
+    coord_cartesian(xlim = c(log(0.25), log(4)), ylim = c(log(0.25), log(4))) +
+    theme(
+      legend.position = "none"
+    )
+  ggsave(sprintf("CorrelationScatter_%s_%s.png", database1, database2), width = 4, height = 4)
+}
+plotScatter("CCAE", "MDCR")
+plotScatter("CCAE", "OptumEHR")
+plotScatter("CCAE", "Germany_DA")
+
+vizData <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  # inner_join(atLeastNddbs) |>
+  filter(databaseId %in% c("CCAE", "OptumEHR")) |>
+  select(targetId, comparatorId, outcomeId, databaseId, logRr, seLogRr) |>
+  pivot_wider(values_from = c(logRr, seLogRr), names_from = databaseId)
+vizData <- vizData |>
+  filter(!is.na(logRr_CCAE), !is.na(logRr_OptumEHR), seLogRr_CCAE < 0.5, seLogRr_OptumEHR < 0.5)
+cor(vizData$logRr_CCAE, vizData$logRr_OptumEHR)
+ggplot(vizData, aes(x = logRr_CCAE, y = logRr_OptumEHR)) +
+  # geom_abline(slope = 1) +
+  # geom_smooth(method = "lm",) +
+  geom_point(aes(size = (seLogRr_OptumEHR + seLogRr_CCAE) ^ 0.01, alpha =  (seLogRr_OptumEHR + seLogRr_CCAE) ^ -1)) +
+  scale_x_continuous("Hazard ratio CCAE", breaks = log(breaks), labels = breaks) +
+  scale_y_continuous("Hazard ratio Optum EHR", breaks = log(breaks), labels = breaks) +
+  coord_cartesian(xlim = c(log(0.25), log(4)), ylim = c(log(0.25), log(4))) +
+  theme(
+    legend.position = "none"
+  )
+
+vizData <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  # inner_join(atLeastNddbs) |>
+  filter(databaseId %in% c("CCAE", "Germany_DA")) |>
+  select(targetId, comparatorId, outcomeId, databaseId, logRr, seLogRr) |>
+  pivot_wider(values_from = c(logRr, seLogRr), names_from = databaseId)
+vizData <- vizData |>
+  filter(!is.na(logRr_CCAE), !is.na(logRr_Germany_DA), seLogRr_CCAE < 0.5, seLogRr_Germany_DA < 0.5)
+cor(vizData$logRr_CCAE, vizData$logRr_Germany_DA)
+ggplot(vizData, aes(x = logRr_CCAE, y = logRr_Germany_DA)) +
+  geom_abline(slope = 1) +
+  # geom_smooth(method = "lm",) +
+  geom_point(aes(size = (seLogRr_Germany_DA + seLogRr_CCAE) ^ 0.01, alpha =  (seLogRr_Germany_DA + seLogRr_CCAE) ^ -1)) +
+  scale_x_continuous("Hazard ratio CCAE", breaks = log(breaks), labels = breaks) +
+  scale_y_continuous("Hazard ratio Germany DA", breaks = log(breaks), labels = breaks) +
+  coord_cartesian(xlim = c(log(0.25), log(4)), ylim = c(log(0.25), log(4))) +
+  theme(
+    legend.position = "none"
+  )
+
+vizData <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  # inner_join(atLeastNddbs) |>
+  filter(databaseId %in% c("MDCD", "OptumDod")) |>
+  select(targetId, comparatorId, outcomeId, databaseId, logRr, seLogRr) |>
+  pivot_wider(values_from = c(logRr, seLogRr), names_from = databaseId)
+ggplot(vizData, aes(x = logRr_MDCD, y = logRr_OptumDod)) +
+  geom_abline(slope = 1) +
+  # geom_smooth(method = "lm",) +
+  geom_
+  geom_point(aes(size = (seLogRr_OptumDod + seLogRr_MDCD) ^ 0.01, alpha =  (seLogRr_OptumDod + seLogRr_MDCD) ^ -1)) +
+  scale_x_continuous("Hazard ratio CCAE", breaks = log(breaks), labels = breaks) +
+  scale_y_continuous("Hazard ratio Optum DoD", breaks = log(breaks), labels = breaks) +
+  coord_cartesian(xlim = c(log(0.25), log(4)), ylim = c(log(0.25), log(4))) +
+  theme(
+    legend.position = "none"
+  )
+
+
+
 # Non-Bayesian correlation metric ------------------------------------------------------------------
-# source("ComputeDatabaseCorrelation.R")
-# estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
-# analysisName <- unique(estimates$analysisName)[2]
-# analysisName
-#
-# atLeastNddbs <- estimates |>
-#   filter(analysisName == !!analysisName) |>
-#   group_by(targetId, comparatorId, outcomeId) |>
-#   summarise(n = n(), .groups = "drop") |>
-#   filter(n >= minDatabases) |>
-#   arrange(targetId, comparatorId, outcomeId) |>
-#   mutate(dummyOutcomeId = row_number())
-#
-# dataLong <- estimates |>
-#   filter(analysisName == !!analysisName) |>
-#   inner_join(atLeastNddbs, by = join_by(targetId, comparatorId, outcomeId)) |>
-#   select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
-#
-# model <- estimateCorrelationMatrix(dataLong)
-# model
+source("ComputeDatabaseCorrelation.R")
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+
+analysisName <- unique(estimates$analysisName)[1]
+analysisName
+
+estimates <- estimates |>
+  filter(negativeControl)
+
+estimates |>
+  group_by(databaseId, analysisName) |>
+  summarise(
+    p05 = quantile(seLogRr, 0.05),
+    p25 = quantile(seLogRr, 0.25),
+    p50 = quantile(seLogRr, 0.55),
+    p75 = quantile(seLogRr, 0.75),
+    p95 = quantile(seLogRr, 0.95)
+  ) |>
+  arrange(p50) |>
+  print(n = 100)
+
+poweredDbs <- estimates  |>
+  group_by(databaseId, analysisName) |>
+  summarise(medianSe = median(seLogRr), .groups = "drop") |>
+  filter(medianSe < 1) |>
+  group_by(databaseId) |>
+  summarise(analysisCount = n()) |>
+  filter(analysisCount == length(unique(estimates$analysisName)))
+
+dummyOutcomeIds <- estimates |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(poweredDbs, by = join_by(databaseId)) |>
+  distinct(targetId, comparatorId, outcomeId) |>
+  arrange(targetId, comparatorId, outcomeId) |>
+  mutate(dummyOutcomeId = row_number())
+
+dataLong<- estimates |>
+  filter(analysisName == !!analysisName) |>
+  inner_join(dummyOutcomeIds, by = join_by(targetId, comparatorId, outcomeId)) |>
+  inner_join(poweredDbs, by = join_by(databaseId)) |>
+  select(databaseId, outcomeId = dummyOutcomeId, logRr, seLogRr)
+
+fit <- estimateCorrelationMatrix(dataLong)
+fullMatrix <- bind_cols(tibble(db = rownames(fit$correlationMatrix)), as_tibble(fit$correlationMatrix))
+readr::write_csv(fullMatrix, sprintf("LegendDbCorrelation_NonBayesian_%s_%s.csv", gsub(" ", "", analysisName), legendLabel))
 
 # Compute tau for calibrated estimates -------------------------------------------------------------
 # We shouldn't really do this as systematic error will be correlated between databases, but it can
@@ -953,7 +1101,8 @@ estimates <- estimates |>
 if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel)) && grepl("match", analysisName)) {
   diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
   estimates <- estimates |>
-    left_join(diagnostics)
+    inner_join(diagnostics) |>
+    filter(unblind)
 }
 
 atLeastNdbs <- estimates |>
@@ -997,10 +1146,9 @@ exampleEstimates <- estimates |>
 
 plotForest(data = exampleEstimates,
            labels = exampleEstimates$databaseId,
-           exclude = !exampleEstimates$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/example1.png")
+           fileName = "Symposium/NetworkBuild1.svg")
 
 subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC"))
 plotForest(data = subset,
@@ -1008,7 +1156,9 @@ plotForest(data = subset,
            exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/example1a.png")
+           showBayesianRandomEffects = FALSE,
+           showPredictionInterval = FALSE,
+           fileName = "Symposium/NetworkBuild1a.svg")
 
 subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC"))
 plotForest(data = subset,
@@ -1016,7 +1166,7 @@ plotForest(data = subset,
            exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/example1b.png")
+           fileName = "Symposium/NetworkBuild1b.svg")
 
 subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC", "Panther"))
 plotForest(data = subset,
@@ -1024,7 +1174,7 @@ plotForest(data = subset,
            exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/example1c.png")
+           fileName = "Symposium/NetworkBuild1c.svg")
 
 subset <- exampleEstimates |> filter(databaseId %in% c("NHIS_NSC", "JMDC", "Panther", "MDCR"))
 plotForest(data = subset,
@@ -1032,7 +1182,7 @@ plotForest(data = subset,
            exclude = !subset$unblind,
            showFixedEffects = FALSE,
            showRandomEffects = FALSE,
-           fileName = "Symposium/example1d.png")
+           fileName = "Symposium/NetworkBuild1d.svg")
 
 # Picking example for symposium:
 outcomesOfInterest <- c("Acute myocardial infarction",
@@ -1069,4 +1219,280 @@ for (i in seq_len(nrow(examples))) {
 
 estimates |> group_by(databaseId) |> summarise(mean(unblind))
 subset <- estimates |> filter(databaseId == "CUMC")
+
+# Compare estimate correlation to DB characteristics similarity ------------------------------------
+similarity <- readr::read_csv("/Users/schuemie/Library/CloudStorage/OneDrive-JNJ/home/Research/Reproducibility/DatabaseCharacteristicsSimilarityEviNet.csv")
+nameMappings <- tibble(
+  oldName = c("truven_ccae_v2887", "IQVIA Germany DA", "truven_mdcd_v2888", "truven_mdcr_v2886", "optum_extended_dod_v2882", "optum_ehr_v2885", "UK IMRD EMIS", "US OPEN CLAIMS", "VA-OMOP"),
+  newName = c("CCAE", "Germany_DA", "MDCD", "MDCR", "OptumDod", "OptumEHR", "UK_IMRD", "US_Open_Claims", "VA-OMOP")
+)
+idx <- match(nameMappings$oldName, similarity$databaseId1)
+similaritySubset <- similarity[idx, idx + 1]
+colnames(similaritySubset) <- nameMappings$newName
+similaritySubset <- bind_cols(tibble(databaseId1 = nameMappings$newName), similaritySubset)
+similarityLong <- tidyr::pivot_longer(similaritySubset, cols = nameMappings$newName, names_to = "databaseId2", values_to = "similarity")
+
+correlation <- readr::read_csv( sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", "unadjusted"), legendLabel)) |>
+  rename(`VA-OMOP` = VAMOMOP) |>
+  mutate(databaseId1 = gsub("VAMOMOP", "VA-OMOP", databaseId1))
+# correlation <- readr::read_csv( sprintf("LegendDbCorrelation_NonBayesian_%s_%s.csv", gsub(" ", "", "unadjusted"), legendLabel)) |>
+#   rename(databaseId1 = db)
+idx <- match(nameMappings$newName, correlation$databaseId1)
+idx <- idx[!is.na(idx)]
+correlationSubset <- correlation[idx, c(1, idx + 1)]
+correlationLong <- tidyr::pivot_longer(correlationSubset, cols = nameMappings$newName, names_to = "databaseId2", values_to = "correlation")
+
+# correlationMatched <- readr::read_csv( sprintf("LegendDbCorrelation_%s_%s.csv", gsub(" ", "", "PSmatched"), legendLabel)) |>
+#   rename(`VA-OMOP` = VAMOMOP) |>
+#   mutate(databaseId1 = gsub("VAMOMOP", "VA-OMOP", databaseId1))
+# # correlationMatched <- readr::read_csv( sprintf("LegendDbCorrelation_NonBayesian_%s_%s.csv", gsub(" ", "", "PSmatched"), legendLabel)) |>
+# #   rename(databaseId1 = db)
+#
+# idx <- match(nameMappings$newName, correlationMatched$databaseId1)
+# idx <- idx[!is.na(idx)]
+# correlationMatchedSubset <- correlationMatched[idx, c(1, idx + 1)]
+# correlationMatchedLong <- tidyr::pivot_longer(correlationMatchedSubset, cols = nameMappings$newName, names_to = "databaseId2", values_to = "correlationMatched")
+
+
+merged <- inner_join(
+  similarityLong |>
+    filter(databaseId1 > databaseId2),
+  correlationLong |>
+    filter(databaseId1 > databaseId2),
+  by = join_by(databaseId1, databaseId2)
+) |>
+  mutate(va = databaseId1 == "VA-OMOP" | databaseId2 == "VA-OMOP")
+pearsonCorrelation <- tibble(
+  x = min(merged$similarity),
+  y = max(merged$correlation),
+  va = FALSE,
+  label = sprintf("Pearson correlation = %0.2f", cor(merged$similarity, merged$correlation))
+)
+ggplot(merged, aes(x = similarity, y = correlation)) +
+  geom_smooth(method = "lm", color = "darkgray", alpha = 0.25) +
+  geom_point(color = "#336B91", alpha = 0.8) +
+  geom_label(aes(x = x, y = y, label = label), hjust = 0, data = pearsonCorrelation) +
+  scale_x_continuous("Database characteristics similarity") +
+  scale_y_continuous("Effect estimate correlation")
+ggsave("ComparingSimilarityToCorrelation.png", width = 4, height = 4)
+
+ggplot(merged, aes(x = similarity, y = correlation, color = va)) +
+  geom_smooth(method = "lm", color = "darkgray", alpha = 0.25) +
+  geom_point(alpha = 0.8) +
+  geom_label(aes(x = x, y = y, label = label), color = "black", hjust = 0, data = pearsonCorrelation) +
+  scale_x_continuous("Database characteristics similarity") +
+  scale_y_continuous("Effect estimate correlation")
+ggsave("ComparingSimilarityToCorrelationHighlightVA.png", width = 4, height = 4)
+
+library(pheatmap)
+library(dplyr)
+matrix <- as.matrix(similaritySubset |> select(-databaseId1))
+rownames(matrix) <- similaritySubset$databaseId1
+matrix = 1 - matrix # Turn similarity into distance
+hc <- hclust(as.dist(matrix), method = "average")
+
+pheatmap(
+  matrix,                 # similarity matrix
+  clustering_method = "average", # match hclust method
+  clustering_distance_rows = as.dist(matrix),
+  clustering_distance_cols = as.dist(matrix),
+  display_numbers = F,    # show numbers if you want
+  fontsize = 4,
+  width = 4,
+  height = 4,
+  treeheight_row = 40,        # height of row dendrogram
+  treeheight_col = 40,
+  filename = "TempHeatMap.png"
+)
+orderedDatabaseIds <- hc$labels[hc$order]
+vizData <- bind_rows(
+    similarityLong |>
+      mutate(metric = "Characteristics similarity",
+             value = similarity),
+    correlationLong |>
+      mutate(metric = "Correlation unadjusted estimates",
+             value = correlation)
+    # correlationMatchedLong |>
+    #   mutate(metric = "Correlation PS-matched estimates",
+    #          value = correlationMatched)
+  ) |>
+  mutate(
+    databaseId1 = factor(databaseId1, levels = orderedDatabaseIds),
+    databaseId2 = factor(databaseId2, levels = orderedDatabaseIds),
+    metric = factor(metric, levels = c("Characteristics similarity", "Correlation unadjusted estimates", "Correlation PS-matched estimates")),
+    label = sprintf("%0.2f", value)
+  )
+ggplot(vizData, aes(x = databaseId1, y = databaseId2, fill = value)) +
+  geom_tile(alpha = 0.8) +
+  geom_text(aes(label = label), size = 2.5) +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev, position = "right") +
+  scale_fill_gradientn(limits = c(0, 1.01),
+                       colors = c("#EB6622", "#FBC511", "#69AED5", "#336B91"),
+                       values = c(0, .50, .75, .90, 1.01)) +
+  facet_grid(~metric) +
+  theme(
+    strip.background = element_blank(),
+    strip.placement = "outside",
+    panel.background = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = -45, hjust = 1),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    plot.margin = margin(0.1, 0.1, 0.25, 2, "cm"),
+  )
+# ggsave("SimilarityAndCorrelation.png", width = 9, height = 4.5)
+ggsave("SimilarityAndCorrelation.png", width = 7, height = 4.5)
+
+plot1 <- ggplot(vizData |> filter(metric == "Characteristics similarity"), aes(x = databaseId1, y = databaseId2, fill = value)) +
+  geom_tile(alpha = 0.8) +
+  geom_text(aes(label = label), size = 2.5) +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev, position = "right") +
+  # scale_fill_gradientn(limits = c(0, 1.01),
+  #                      colors = c("#EB6622", "#FBC511", "#69AED5", "#336B91"),
+  #                      values = c(0, .50, .75, .90, 1.01)) +
+  scale_fill_gradientn(limits = c(0, 1.01),
+                       colors = c("white", "white", "#FBC511", "#EB6622"),
+                       values = c(0, 0.50,  .90, 1.01)) +
+  labs(fill = "Similarity") +
+  facet_grid(~metric) +
+  theme(
+    strip.background = element_blank(),
+    strip.placement = "outside",
+    panel.background = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = -45, hjust = 1),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "left",
+    legend.title = element_text(size = 10),
+    plot.margin = margin(0.1, 0.1, 2, 0.25, "cm"),
+  )
+plot2 <- ggplot(vizData |> filter(metric == "Correlation unadjusted estimates"), aes(x = databaseId1, y = databaseId2, fill = value)) +
+  geom_tile(alpha = 0.8) +
+  geom_text(aes(label = label), size = 2.5) +
+  scale_x_discrete(position = "top") +
+  scale_y_discrete(limits = rev, position = "right") +
+  scale_fill_gradientn(limits = c(0.4, 1.01),
+                       colors = c("white", "white", "#69AED5", "#336B91"),
+                       values = c(0, 0.5, .80, 1.01)) +
+  facet_grid(~metric) +
+  labs(fill = "Correlation") +
+  theme(
+    strip.background = element_blank(),
+    strip.placement = "outside",
+    panel.background = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = -45, hjust = 1),
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    plot.margin = margin(0.1, 0.1, 2, 0.25, "cm"),
+  )
+plot <- gridExtra::grid.arrange(plot1, plot2, ncol = 2, widths = c(1, 1.3))
+ggsave("SimilarityAndCorrelation.png", plot = plot, width = 8, height = 4.5)
+
+# Compute tau and coverage for subset of database --------------------------------------------------
+source("PredictionInterval.R")
+estimates <- readRDS(sprintf("estimates_%s.rds", legendLabel))
+if (file.exists(sprintf("Diagnostics_%s.rds", legendLabel))) {
+  analysisName <- unique(estimates$analysisName)
+  analysisName <- analysisName[grepl("match", analysisName)]
+  diagnostics <- readRDS(sprintf("Diagnostics_%s.rds", legendLabel))
+  # Do not blind on EASE, since we'll be testing against the negative controls:
+  estimates <- estimates |>
+    filter(analysisName == !!analysisName) |>
+    inner_join(diagnostics) |>
+    filter(minEquipoise > 0.2 & maxAbsStdDiffMean < 0.1)
+}
+databaseSubset <- c("MDCD", "MDCR", "CCAE", "OptumDod")
+
+atLeastNdbs <- estimates |>
+  filter(negativeControl) |> # Restrict to negative controls
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl) |>
+  summarise(nDatabases = n(), .groups = "drop") |>
+  filter(nDatabases >= 5)
+
+groups <- estimates |>
+  inner_join(
+    atLeastNdbs,
+    by = join_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
+  ) |>
+  group_by(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)|>
+  group_split()
+
+# group = groups[[10]]
+computeTau <- function(group, databaseSubset) {
+  keyRow <- group |>
+    head(1) |>
+    select(targetId, targetName, comparatorId, comparatorName, outcomeId, analysisName, negativeControl)
+  maEstimate <- EvidenceSynthesis::computeBayesianMetaAnalysis(group, showProgressBar = FALSE)
+  predictionInterval <- computePredictionInterval(maEstimate)
+  tauSample <- sample(attr(maEstimate, "traces")[, 2], 100)
+
+  groupSubset <- group |>
+    filter(databaseId %in% databaseSubset)
+  if (nrow(groupSubset) > 1) {
+    maEstimateSubset <- EvidenceSynthesis::computeBayesianMetaAnalysis(groupSubset, showProgressBar = FALSE)
+    predictionIntervalSubset <- computePredictionInterval(maEstimateSubset)
+    tauSampleSubset <- sample(attr(maEstimateSubset, "traces")[, 2], 100)
+  } else {
+    maEstimateSubset <- tibble(
+      mu = as.numeric(NA),
+      mu95Lb = as.numeric(NA),
+      mu95Ub = as.numeric(NA),
+      tau = as.numeric(NA),
+      tau95Lb = as.numeric(NA),
+      tau95Ub = as.numeric(NA)
+    )
+    predictionIntervalSubset <- as.numeric(c(NA, NA))
+    tauSampleSubset <- NULL
+  }
+  row <- keyRow |>
+    bind_cols(maEstimate |>
+                select(mu, mu95Lb, mu95Ub, tau, tau95Lb, tau95Ub)) |>
+    mutate(piL95Lb = predictionInterval[1], pi95Ub = predictionInterval[2]) |>
+    mutate(muSignificant = mu95Lb > 0 | mu95Ub < 0,
+           piSignificant = mu95Lb > 0 | pi95Ub < 0) |>
+    bind_cols(maEstimateSubset |>
+                select(muSubset = mu, mu95LbSubset = mu95Lb, mu95UbSubset = mu95Ub, tauSubset = tau, tau95LbSubset = tau95Lb, tau95UbSubset = tau95Ub)) |>
+    mutate(piL95LbSubset = predictionIntervalSubset[1], pi95UbSubset = predictionIntervalSubset[2]) |>
+    mutate(muSubsetSignificant = mu95LbSubset > 0 | mu95UbSubset < 0,
+           piSubsetSignificant = mu95LbSubset > 0 | pi95UbSubset < 0)
+
+  return(list(row = row, tauSample = tauSample, tauSampleSubset = tauSampleSubset))
+}
+
+cluster <- ParallelLogger::makeCluster(10)
+parallel::clusterExport(cluster, "computePredictionInterval")
+ParallelLogger::clusterRequire(cluster, "dplyr")
+tauRowsAndSamples <- ParallelLogger::clusterApply(cluster, groups, computeTau, databaseSubset = databaseSubset)
+ParallelLogger::stopCluster(cluster)
+
+taus <- bind_rows(lapply(tauRowsAndSamples, function(x) x$row))
+
+taus |>
+  summarise(
+    coverageMu = 1 - mean(muSignificant),
+    coveragePi = 1 - mean(piSignificant),
+    coverageMuSubset = 1 - mean(muSubsetSignificant),
+    coveragePiSubset = 1 - mean(piSubsetSignificant)
+  )
+
+
+tauSample <- do.call(c, lapply(tauRowsAndSamples, function(x) x$tauSample))
+if (length(tauSample) > 10000) {
+  tauSample <- sample(tauSample, 10000)
+}
+tauSampleSubset <- do.call(c, lapply(tauRowsAndSamples, function(x) x$tauSampleSubset))
+if (length(tauSampleSubset) > 10000) {
+  tauSampleSubset <- sample(tauSampleSubset, 10000)
+}
+median(tauSample)
+median(tauSampleSubset)
+
+
+# saveRDS(taus, sprintf("taus_%s.rds", legendLabel))
+# saveRDS(tauSamples, sprintf("tauSamples_%s.rds", legendLabel))
+
 

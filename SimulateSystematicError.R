@@ -432,10 +432,15 @@ ParallelLogger::stopCluster(cluster)
 # Explore single example -----------------------------------------------------------------
 settings <- createSimulationSettings(nDatabases = 5,
                                      nNegativeControls = 100,
-                                     nOutcomesOfInterest = 1000,
+                                     nOutcomesOfInterest = 100,
                                      minSe = 0.01,
-                                     maxSe = 0.05)
-set.seed(1)
+                                     maxSe = 0.05,
+                                     minDatabaseSizeMultiplier = 1,
+                                     maxDatabaseSizeMultiplier = 1,
+                                     biasSourceSd = 0.2,
+                                     biasOutcomeSd = 0.2,
+                                     trueTau = 0)
+# set.seed(1)
 
 dbSizeMultipliers <- runif(settings$nDatabases, settings$minDatabaseSizeMultiplier, settings$maxDatabaseSizeMultiplier)
 # Draw the base standard error for each outcome, reflecting some outcomes are more prevalent than others:
@@ -489,6 +494,8 @@ colMeans(biasOutcomeDb)
 
 model$covarianceMatrix
 cov(biasOutcomeDb)
+cor(biasOutcomeDb)
+
 
 estimates <- list()
 for (i in seq_len(settings$nOutcomesOfInterest)) {
@@ -501,5 +508,31 @@ for (i in seq_len(settings$nOutcomesOfInterest)) {
 
 }
 estimates <- bind_rows(estimates)
-mean(sqrt(estimates$tau2CiLower) < settings$trueTau & sqrt(estimates$tau2CiUpper) > settings$trueTau)
+mean(sqrt(estimates$tau2CiLower) < settings$trueTau & sqrt(estimates$tau2CiUpper) > settings$trueTau, na.rm = TRUE)
 mean(log(estimates$ciLower) < settings$trueLogRr & log(estimates$ciUpper) > settings$trueLogRr)
+
+# Bayesian 2-step approach:
+model <- fitBayesianSystematicErrorModel(data)
+summary(model)
+estimates <- list()
+for (i in seq_len(settings$nOutcomesOfInterest)) {
+  print(i)
+  newData <- tibble(
+    logRr = logRrs[settings$nNegativeControls + i, ],
+    seLogRr = seLogRrs[settings$nNegativeControls + i, ],
+    databaseId = seq_len(settings$nDatabases)
+  )
+  estimates[[i]] <- calibrateCiBayesianRandomEffects(model, newData)
+}
+estimates <- bind_rows(estimates)
+mean(sqrt(estimates$tau2CiLower) < settings$trueTau & sqrt(estimates$tau2CiUpper) > settings$trueTau, na.rm = TRUE)
+mean(log(estimates$ciLower) < settings$trueLogRr & log(estimates$ciUpper) > settings$trueLogRr)
+
+# Unified model
+data <- tibble(
+  logRr = as.vector(logRrs),
+  seLogRr = as.vector(seLogRrs),
+  databaseId = rep(seq_len(settings$nDatabases), each = settings$nNegativeControls + settings$nOutcomesOfInterest),
+  outcomeId = rep(seq_len(settings$nNegativeControls + settings$nOutcomesOfInterest), settings$nDatabases),
+  negativeControl = rep(c(rep(1, settings$nNegativeControls), rep(0, settings$nOutcomesOfInterest)), settings$nDatabases)
+)

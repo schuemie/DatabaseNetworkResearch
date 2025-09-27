@@ -5,82 +5,50 @@ library(mvtnorm)
 library(dplyr)
 library(tidyr)
 
-reconstructMatrices <- function(params, nDatabases) {
-  nCorrelationParams <- nDatabases * (nDatabases - 1) / 2
-
-  # Reconstruct the correlation matrix
-  offDiagonals <- tanh(params[1:nCorrelationParams])
-  correlationMatrix <- diag(nDatabases)
-  correlationMatrix[lower.tri(correlationMatrix)] <- offDiagonals
-  correlationMatrix <- correlationMatrix + t(correlationMatrix) - diag(nDatabases)
-
-  # Reconstruct the standard deviations (taus)
-  logTaus <- params[(nCorrelationParams + 1):(nCorrelationParams + nDatabases)]
-  taus <- exp(logTaus)
-
-  return(list(
-    correlationMatrix = correlationMatrix,
-    taus = taus
-  ))
+constructCovarianceMatrix <- function(params, nDatabases) {
+  choleskyParams <- params[(nDatabases + 1):length(params)]
+  choleskyMatrix <- matrix(0, nrow = nDatabases, ncol = nDatabases)
+  choleskyMatrix[lower.tri(choleskyMatrix, diag = TRUE)] <- choleskyParams
+  covarianceMatrix <- choleskyMatrix %*% t(choleskyMatrix)
+  return(covarianceMatrix)
 }
 
 computeNegativeLogLikelihood <- function(params, logRrMatrix, seLogRrMatrix, nDatabases) {
-  # p <<- params
-  # params <- p
-  reconstructed <- reconstructMatrices(params, nDatabases)
-  correlationMatrix <- reconstructed$correlationMatrix
-  taus <- reconstructed$taus
-
-  # A correlation matrix must be positive definite. The Cholesky decomposition
-  # will fail if it is not. We use try() to catch this failure.
-  cholTest <- try(chol(correlationMatrix), silent = TRUE)
-  if (inherits(cholTest, "try-error")) {
-    return(1e9)
-  }
-
-  # Between-database covariance matrix (of true effects)
-  covarianceMatrix <- diag(taus) %*% correlationMatrix %*% diag(taus)
-
+  meanVector <- params[1:nDatabases]
+  covarianceMatrix <- constructCovarianceMatrix(params, nDatabases)
   totalLogLikelihood <- 0
-
-  # Iterate over each outcome (row)
   for (i in 1:nrow(logRrMatrix)) {
-    y <- logRrMatrix[i, ]
-    se <- seLogRrMatrix[i, ]
+    logRr <- logRrMatrix[i, ]
+    seLogRr <- seLogRrMatrix[i, ]
 
     # Check for missing data for this outcome
-    validIndices <- !is.na(y)
+    validIndices <- !is.na(seLogRr)
+
     if (sum(validIndices) < 2) {
       next # Cannot compute likelihood for a single point
     }
-
     # Subset matrices to non-missing data
-    ySub <- y[validIndices]
-    seSub <- se[validIndices]
-    covSub <- covarianceMatrix[validIndices, validIndices]
+    logRrSubset <- logRr[validIndices]
+    seLogRrSubset <- seLogRr[validIndices]
+    meanVectorSubset <- meanVector[validIndices]
+    covarianceMatrixSubset <- covarianceMatrix[validIndices, validIndices]
 
     # Within-database variance matrix (measurement error)
-    varianceMatrix <- diag(seSub^2)
+    varianceMatrixSubset <- diag(seLogRrSubset^2)
 
     # Total covariance for this outcome
-    totalCovariance <- covSub + varianceMatrix
+    totalCovarianceSubset <- covarianceMatrixSubset + varianceMatrixSubset
 
     logLikelihood <- tryCatch({
-      invTotalCov <- solve(totalCovariance)
-      muHat <- sum(invTotalCov %*% ySub) / sum(invTotalCov)
-      dmvnorm(ySub, mean = rep(muHat, length(ySub)), sigma = totalCovariance, log = TRUE)
-
+      dmvnorm(logRrSubset, mean = meanVectorSubset, sigma = totalCovarianceSubset, log = TRUE)
     }, error = function(e) {
-      print("error", e$message)
-      -1e9
+      # Return a very small number if the covariance matrix is not invertible
+      return(-1e10)
     })
-    # print(paste(i, logLikelihood))
     totalLogLikelihood <- totalLogLikelihood + logLikelihood
   }
-
   # print(paste(totalLogLikelihood, paste(params, collapse = ",")))
   print(totalLogLikelihood)
-  # Return the negative log-likelihood for minimization
   return(-totalLogLikelihood)
 }
 
@@ -94,67 +62,43 @@ estimateCorrelationMatrix <- function(data) {
       id_cols = outcomeId,
       names_from = databaseId,
       values_from = c(logRr, seLogRr),
-      names_sort = TRUE # Ensure consistent column order
+      names_sort = TRUE
     )
 
   databaseIds <- sort(databaseIds)
   logRrCols <- paste0("logRr_", databaseIds)
   seLogRrCols <- paste0("seLogRr_", databaseIds)
-
   logRrMatrix <- as.matrix(dataWide[, logRrCols])
   seLogRrMatrix <- as.matrix(dataWide[, seLogRrCols])
 
-  # Set initial parameter values for optimization
-  nCorrelationParams <- nDatabases * (nDatabases - 1) / 2
-  initialCorrelationParams <- rep(0, nCorrelationParams)
-  initialLogTaus <- rep(log(0.1), nDatabases)
-  initialParams <- c(initialCorrelationParams, initialLogTaus)
-
-  # Run the optimization
-  message("Starting likelihood optimization...")
+  initialMean <- rep(0, nDatabases)
+  initialCholesky <- t(chol(diag(nDatabases) * 0.1))
+  initialCholeskyParams <- initialCholesky[lower.tri(initialCholesky, diag = TRUE)]
+  initialParams <- c(initialMean, initialCholeskyParams)
   optimResult <- optim(
     par = initialParams,
     fn = computeNegativeLogLikelihood,
     logRrMatrix = logRrMatrix,
     seLogRrMatrix = seLogRrMatrix,
     nDatabases = nDatabases,
-    # method = "BFGS",
-     method = "L-BFGS-B",
+    method = "L-BFGS-B",
     control = list(maxit = 2000)
   )
-
-  optimResult <- nlm(
-    p = initialParams,
-    f = computeNegativeLogLikelihood,
-    iterlim = 5000,      # Increased iteration limit
-    gradtol = 1e-8,      # Stricter gradient tolerance
-    steptol = 1e-8,
-    logRrMatrix = logRrMatrix,
-    seLogRrMatrix = seLogRrMatrix,
-    nDatabases = nDatabases
-  )
-
-
   if (optimResult$convergence != 0) {
-    warning("Optimization may not have converged. Code: ", optimResult$convergence)
+    warning(sprintf("Optim failed to converge with covergence = %s", optimResult$convergence))
   }
-
-  # Reconstruct the final matrices from optimized parameters
   finalParams <- optimResult$par
-  reconstructedFinal <- reconstructMatrices(finalParams, nDatabases)
+  finalMean <- finalParams[1:nDatabases]
+  names(finalMean) <- databaseIds
 
-  estimatedCorrelation <- reconstructedFinal$correlationMatrix
-  colnames(estimatedCorrelation) <- databaseIds
-  rownames(estimatedCorrelation) <- databaseIds
+  finalCovarianceMatrix <- constructCovarianceMatrix(finalParams, nDatabases)
+  rownames(finalCovarianceMatrix) <- databaseIds
+  colnames(finalCovarianceMatrix) <- databaseIds
 
-  estimatedTaus <- reconstructedFinal$taus
-  names(estimatedTaus) <- databaseIds
-
-  message("Optimization finished.")
-
+  finalCorrelationMatrix <- cov2cor(finalCovarianceMatrix)
   return(list(
-    correlationMatrix = estimatedCorrelation,
-    standardDeviations = estimatedTaus
+    mean = finalMean,
+    covarianceMatrix = finalCovarianceMatrix,
+    correlationMatrix = finalCorrelationMatrix
   ))
 }
-
